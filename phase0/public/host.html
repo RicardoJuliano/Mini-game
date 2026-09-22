@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Project Tilt — Host (Phase 0)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d12; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+  #scene { position: absolute; inset: 0; }
+  #panel {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    background: rgba(15,17,23,0.85); border: 1px solid #2a2e3a; border-radius: 10px;
+    padding: 14px 16px; min-width: 220px;
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; letter-spacing: .03em; color: #9fb3ff; }
+  #qr { background: #fff; padding: 8px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
+  #url { font-size: 11px; word-break: break-all; color: #9aa4b2; margin-bottom: 10px; }
+  .stat { display: flex; justify-content: space-between; font-size: 13px; margin: 3px 0; }
+  .stat .v { font-variant-numeric: tabular-nums; }
+  .ok { color: #6ee7a0; }
+  .warn { color: #f5c451; }
+  .bad { color: #f56565; }
+  #overlay {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.75); font-size: 28px; z-index: 20;
+  }
+</style>
+</head>
+<body>
+  <div id="scene"></div>
+  <div id="panel">
+    <h1>PROJECT TILT — PHASE 0</h1>
+    <div id="qr"></div>
+    <div id="url"></div>
+    <div class="stat"><span>Connection</span><span class="v" id="conn">waiting…</span></div>
+    <div class="stat"><span>RTT (ping)</span><span class="v" id="rtt">—</span></div>
+    <div class="stat"><span>Input p95 (target &lt;30ms)</span><span class="v" id="p95">—</span></div>
+    <div class="stat"><span>Packets</span><span class="v" id="pkts">0</span></div>
+  </div>
+  <div id="overlay">Player disconnected</div>
+
+  <script src="shared/three.min.js"></script>
+  <script src="shared/qrcode.min.js"></script>
+  <script src="shared/protocol.js"></script>
+  <script>
+    // --- QR code + join URL ---
+    const controllerUrl = `${location.protocol}//${location.host}/controller.html`;
+    document.getElementById("url").textContent = controllerUrl;
+    const qr = qrcode(0, "M");
+    qr.addData(controllerUrl);
+    qr.make();
+    document.getElementById("qr").innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2 });
+
+    // --- three.js scene ---
+    const sceneEl = document.getElementById("scene");
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0d12);
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 2.2, 5);
+    camera.lookAt(0, 0, 0);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    sceneEl.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.2));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(3, 5, 2);
+    scene.add(dir);
+    const grid = new THREE.GridHelper(20, 20, 0x2a2e3a, 0x1a1d24);
+    scene.add(grid);
+
+    const cube = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0x6ea8fe, metalness: 0.2, roughness: 0.5 })
+    );
+    cube.position.y = 0.5;
+    scene.add(cube);
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // --- input state ---
+    let targetSteer = 0; // -1..1, shaped
+    let lastPacketAt = 0;
+    let packetCount = 0;
+    const HOLD_MS = 100, NEUTRAL_MS = 500;
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const now = performance.now();
+      const sinceLast = now - lastPacketAt;
+      let steer = targetSteer;
+      if (lastPacketAt > 0 && sinceLast > NEUTRAL_MS) steer = 0;
+      cube.rotation.y += steer * 0.06; // steering turns the cube; not real kart physics, just a feel test
+      cube.rotation.z = -steer * 0.3;
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // --- disconnect overlay ---
+    const overlay = document.getElementById("overlay");
+    setInterval(() => {
+      if (lastPacketAt > 0 && performance.now() - lastPacketAt > NEUTRAL_MS) {
+        overlay.style.display = "flex";
+      } else {
+        overlay.style.display = "none";
+      }
+    }, 150);
+
+    // --- latency tracking (p95 over a rolling window) ---
+    const latencies = [];
+    function recordLatency(ms) {
+      latencies.push(ms);
+      if (latencies.length > 200) latencies.shift();
+      const sorted = [...latencies].sort((a, b) => a - b);
+      const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95));
+      const p95 = sorted[idx];
+      const el = document.getElementById("p95");
+      el.textContent = `${p95.toFixed(1)} ms`;
+      el.className = "v " + (p95 < 30 ? "ok" : p95 < 60 ? "warn" : "bad");
+    }
+
+    // --- websocket ---
+    const ws = new WebSocket(`ws://${location.host}`);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ type: "hello", role: "host" }));
+      document.getElementById("conn").textContent = "host online";
+      setInterval(() => ws.send(JSON.stringify({ type: "ping", t: performance.now() })), 1000);
+    });
+    ws.addEventListener("message", (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "pong") {
+        const rtt = performance.now() - msg.t;
+        const el = document.getElementById("rtt");
+        el.textContent = `${rtt.toFixed(1)} ms`;
+        el.className = "v " + (rtt < 40 ? "ok" : rtt < 100 ? "warn" : "bad");
+      } else if (msg.type === "controller-joined") {
+        document.getElementById("conn").textContent = "controller connected";
+      } else if (msg.type === "controller-left") {
+        document.getElementById("conn").textContent = "controller left";
+      } else if (msg.type === "input") {
+        const now = performance.now();
+        lastPacketAt = now;
+        packetCount++;
+        document.getElementById("pkts").textContent = packetCount;
+        targetSteer = msg.steer / 32767;
+        // Latency = time from phone send (Date.now()) to host receive (Date.now()).
+        // Clocks aren't synced across devices, so this is an estimate; the ping/pong
+        // RTT stat above is the reliable cross-clock number. We still surface this
+        // one-way estimate because it's what the p95 exit criteria is measured against
+        // once phone and host clocks are close enough (same LAN, NTP-synced devices).
+        const oneWay = Date.now() - msg.t;
+        if (oneWay >= 0 && oneWay < 1000) recordLatency(oneWay);
+      }
+    });
+    ws.addEventListener("close", () => {
+      document.getElementById("conn").textContent = "server disconnected";
+    });
+  </script>
+</body>
+</html>
