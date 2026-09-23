@@ -3,162 +3,196 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Project Tilt — Host (Phase 0)</title>
+<title>Project Tilt — Host</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #0b0d12; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+  @font-face { font-family: 'TiltDisplay'; src: url('shared/fonts/display.woff2') format('woff2'); font-display: swap; }
+
+  html, body { margin: 0; height: 100%; background: #241934; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
   #scene { position: absolute; inset: 0; }
+  #speedlines { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+
+  /* --- debug panel: hidden unless ?debug=1 --- */
   #panel {
-    position: absolute; top: 12px; left: 12px; z-index: 10;
-    background: rgba(15,17,23,0.85); border: 1px solid #2a2e3a; border-radius: 10px;
+    position: absolute; top: 12px; left: 12px; z-index: 30; display: none;
+    background: rgba(20,14,30,0.85); border: 1px solid #4a3866; border-radius: 10px;
     padding: 14px 16px; min-width: 220px;
   }
-  #panel h1 { font-size: 14px; margin: 0 0 8px; letter-spacing: .03em; color: #9fb3ff; }
-  #qr { background: #fff; padding: 8px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
-  #url { font-size: 11px; word-break: break-all; color: #9aa4b2; margin-bottom: 10px; }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; letter-spacing: .03em; color: #ff9d7f; }
+  #panel #qr { background: #fff; padding: 8px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
+  #panel #url { font-size: 11px; word-break: break-all; color: #b7a9cc; margin-bottom: 10px; }
   .stat { display: flex; justify-content: space-between; font-size: 13px; margin: 3px 0; }
   .stat .v { font-variant-numeric: tabular-nums; }
-  .ok { color: #6ee7a0; }
-  .warn { color: #f5c451; }
-  .bad { color: #f56565; }
+  .ok { color: #2fe6a0; }
+  .warn { color: #ffc53d; }
+  .bad { color: #ff5d3a; }
+
+  /* --- lobby --- */
+  #lobby { position: absolute; inset: 0; z-index: 15; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 5vh 5vw; box-sizing: border-box; }
+  #lobby.hidden { display: none; }
+  #lobby-title { font-family: 'TiltDisplay', system-ui, sans-serif; font-size: clamp(36px, 7vh, 72px); color: #ff5d3a; text-shadow: 3px 3px 0 #241934; }
+  #lobby-body { display: flex; align-items: center; gap: 48px; background: rgba(20,14,30,0.72); border-radius: 20px; padding: 32px 40px; }
+  #lobby-qr { background: #fff; padding: 14px; border-radius: 10px; }
+  #lobby-qr svg { width: 30vh; height: 30vh; display: block; }
+  #lobby-steps { display: flex; flex-direction: column; gap: 14px; max-width: 360px; }
+  #lobby-steps .step { font-size: 16px; color: #ddd; }
+  #lobby-steps .step b { color: #ffd23f; }
+  #lobby-status { font-family: 'TiltDisplay', system-ui, sans-serif; font-size: 20px; }
+  #lobby-status.waiting { color: #b7a9cc; }
+  #lobby-status.ready { color: #2fe6a0; }
+  #lobby-hint { font-size: 14px; color: #8a5fbf; }
+
+  /* --- race HUD (doc section 7) --- */
+  .hud { position: fixed; inset: 0; pointer-events: none; padding: 5vh 5vw;
+         font-family: 'TiltDisplay', system-ui, sans-serif; color: #fff4e6; z-index: 12; }
+  .hud[hidden] { display: none; }
+  .hud-big   { font-size: clamp(32px, 6vh, 72px); line-height: 1; font-variant-numeric: tabular-nums; }
+  .hud-label { font-size: clamp(14px, 2vh, 22px); letter-spacing: 0.08em; opacity: 0.85; }
+  .hud-best  { color: #ffd23f; }
+
+  .hud-lap, .hud-timer, .hud-speedo, .hud-conn, .hud-minimap {
+    position: absolute; background: rgba(36, 25, 52, 0.72); border-radius: 16px; padding: 1.2vh 1.4vw;
+  }
+  .hud-lap    { top: 5vh; left: 5vw; }
+  .hud-timer  { top: 5vh; left: 50%; transform: translateX(-50%); text-align: center; }
+  .hud-minimap{ top: 5vh; right: 5vw; width: 18vh; height: 18vh; padding: 0; }
+  .hud-speedo { bottom: 5vh; right: 5vw; width: 20vh; height: 20vh; display: grid; place-items: center; }
+  .hud-conn   { bottom: 5vh; left: 5vw; font-size: 14px; opacity: 0.7; }
+  .hud-conn .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #2fe6a0; margin-right: 6px; }
+  .hud-conn .dot.off { background: #ff5d3a; }
+
+  .hud-drift { position: absolute; bottom: calc(5vh + 22vh); right: 5vw; width: 20vh; padding: 0; background: none; }
+  .hud-drift-track { width: 100%; height: 10px; border-radius: 6px; background: rgba(36,25,52,0.6); overflow: hidden; }
+  .hud-drift-fill { height: 100%; width: 0%; background: #4d8dff; transition: background-color 0.15s; }
+
+  .speedo-track, .speedo-fill { fill: none; stroke-width: 10; transform: rotate(135deg); transform-origin: 60px 60px; }
+  .speedo-track { stroke: rgba(255, 244, 230, 0.15); stroke-dasharray: 235.6 314.2; }
+  .speedo-fill  { stroke: #2fe6a0; stroke-linecap: round; stroke-dasharray: 0 314.2; }
+  #hud-speed-wrap { position: relative; display: grid; place-items: center; }
+  #hud-speedo-svg { position: absolute; inset: 0; }
+  .hud-gear { position: absolute; bottom: -6px; font-size: 14px; opacity: 0.8; }
+  .hud-gear.reverse { color: #ff5d3a; }
+
+  .hud-banner { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none;
+                font-family: 'TiltDisplay', system-ui, sans-serif; font-size: clamp(56px, 14vh, 180px);
+                color: #fff4e6; opacity: 0; z-index: 25; text-align: center; text-shadow: 4px 4px 0 #241934; }
+  .hud-banner.show { animation: pop 900ms ease-out forwards; }
+  .hud-banner.go   { color: #ffd23f; }
+  .hud-banner.warn { color: #ff5d3a; }
+  @keyframes pop {
+    0%   { opacity: 0; transform: scale(1.6); }
+    15%  { opacity: 1; transform: scale(1); }
+    75%  { opacity: 1; transform: scale(1); }
+    100% { opacity: 0; transform: scale(0.95); }
+  }
+  @media (prefers-reduced-motion: reduce) { .hud-banner.show { animation-duration: 1ms; opacity: 1; } }
+
+  /* --- results card --- */
+  #results { position: fixed; inset: 0; z-index: 22; display: none; align-items: center; justify-content: center;
+             background: rgba(10,7,15,0.72); }
+  #results.show { display: flex; }
+  #results-card { background: #241934; border: 2px solid #4a3866; border-radius: 20px; padding: 40px 56px;
+                  text-align: center; font-family: 'TiltDisplay', system-ui, sans-serif; }
+  #results-card h2 { font-size: clamp(40px, 8vh, 80px); color: #ffd23f; margin: 0 0 18px; }
+  #results-card .row { font-size: 20px; color: #fff4e6; margin: 6px 0; font-variant-numeric: tabular-nums; }
+  #results-card .row b { color: #2fe6a0; }
+  #results-card .hint { margin-top: 18px; font-size: 15px; color: #b7a9cc; font-family: system-ui, sans-serif; }
+
+  /* --- audio unlock badge: browsers require a real gesture on THIS page --- */
+  #audio-prompt {
+    position: fixed; top: 12px; right: 12px; z-index: 30; cursor: pointer;
+    background: rgba(36,25,52,0.85); color: #fff4e6; border: 1px solid #4a3866; border-radius: 999px;
+    padding: 8px 16px; font-size: 13px; display: flex; align-items: center; gap: 8px;
+  }
+  #audio-prompt.hidden { display: none; }
+
+  /* --- disconnect overlay --- */
   #overlay {
     position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-    background: rgba(0,0,0,0.75); font-size: 28px; z-index: 20;
+    background: rgba(0,0,0,0.75); font-size: clamp(28px, 5vh, 48px); z-index: 28;
+    font-family: 'TiltDisplay', system-ui, sans-serif; color: #ff5d3a; text-align: center;
   }
 </style>
 </head>
 <body>
   <div id="scene"></div>
+  <canvas id="speedlines"></canvas>
+
   <div id="panel">
-    <h1>PROJECT TILT — PHASE 0</h1>
+    <h1>PROJECT TILT — DEBUG</h1>
     <div id="qr"></div>
     <div id="url"></div>
     <div class="stat"><span>Connection</span><span class="v" id="conn">waiting…</span></div>
     <div class="stat"><span>RTT (ping)</span><span class="v" id="rtt">—</span></div>
     <div class="stat"><span>Input p95 (target &lt;30ms)</span><span class="v" id="p95">—</span></div>
+    <div class="stat"><span>Speed</span><span class="v" id="speed">0%</span></div>
     <div class="stat"><span>Packets</span><span class="v" id="pkts">0</span></div>
   </div>
+
+  <div id="lobby">
+    <div id="lobby-title">PROJECT TILT</div>
+    <div id="lobby-body">
+      <div id="lobby-qr"></div>
+      <div id="lobby-steps">
+        <div class="step">1. <b>Aponte a câmera</b> do celular para o código</div>
+        <div class="step">2. Toque em <b>LIGAR O MOTOR</b></div>
+        <div class="step">3. Segure o celular <b>deitado</b>, como um volante</div>
+        <div id="lobby-status" class="waiting">Aguardando controle…</div>
+        <div id="lobby-hint" class="hidden">Aperte ACELERAR para começar</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="hud" class="hud" hidden>
+    <div class="hud-lap">
+      <span class="hud-label">VOLTA</span><br />
+      <span class="hud-big"><span id="hud-lap">1</span>/<span id="hud-laps">3</span></span>
+    </div>
+
+    <div class="hud-timer">
+      <span id="hud-time" class="hud-big">00:00.000</span><br />
+      <span class="hud-label">MELHOR <span id="hud-best" class="hud-best">--:--.---</span></span>
+    </div>
+
+    <canvas id="hud-minimap" class="hud-minimap" width="240" height="240"></canvas>
+
+    <div class="hud-speedo">
+      <div id="hud-speed-wrap">
+        <svg id="hud-speedo-svg" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="speedo-track" cx="60" cy="60" r="50" />
+          <circle id="speedo-fill" class="speedo-fill" cx="60" cy="60" r="50" />
+        </svg>
+        <span id="hud-speed" class="hud-big">0</span>
+        <span id="hud-gear" class="hud-gear">D</span>
+      </div>
+      <span class="hud-label">km/h</span>
+    </div>
+
+    <div class="hud-conn"><span id="hud-conn-dot" class="dot off"></span><span id="hud-rtt">-- ms</span></div>
+
+    <div class="hud-drift" id="hud-drift" hidden>
+      <div class="hud-drift-track"><div id="hud-drift-fill" class="hud-drift-fill"></div></div>
+    </div>
+  </div>
+
+  <div id="hud-banner" class="hud-banner" aria-live="polite"></div>
+
+  <div id="results">
+    <div id="results-card">
+      <h2>FIM!</h2>
+      <div class="row">Tempo total: <b id="results-total">--:--.---</b></div>
+      <div class="row">Melhor volta: <b id="results-best">--:--.---</b></div>
+      <div class="hint">Aperte ACELERAR para correr de novo</div>
+    </div>
+  </div>
+
+  <div id="audio-prompt">🔇 Clique ou aperte uma tecla para ativar o som</div>
+
   <div id="overlay">Player disconnected</div>
 
   <script src="shared/three.min.js"></script>
   <script src="shared/qrcode.min.js"></script>
   <script src="shared/protocol.js"></script>
-  <script>
-    // --- QR code + join URL ---
-    const controllerUrl = `${location.protocol}//${location.host}/controller.html`;
-    document.getElementById("url").textContent = controllerUrl;
-    const qr = qrcode(0, "M");
-    qr.addData(controllerUrl);
-    qr.make();
-    document.getElementById("qr").innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2 });
-
-    // --- three.js scene ---
-    const sceneEl = document.getElementById("scene");
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b0d12);
-    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 2.2, 5);
-    camera.lookAt(0, 0, 0);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    sceneEl.appendChild(renderer.domElement);
-
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.2));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-    dir.position.set(3, 5, 2);
-    scene.add(dir);
-    const grid = new THREE.GridHelper(20, 20, 0x2a2e3a, 0x1a1d24);
-    scene.add(grid);
-
-    const cube = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ color: 0x6ea8fe, metalness: 0.2, roughness: 0.5 })
-    );
-    cube.position.y = 0.5;
-    scene.add(cube);
-
-    window.addEventListener("resize", () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-    });
-
-    // --- input state ---
-    let targetSteer = 0; // -1..1, shaped
-    let lastPacketAt = 0;
-    let packetCount = 0;
-    const HOLD_MS = 100, NEUTRAL_MS = 500;
-
-    function animate() {
-      requestAnimationFrame(animate);
-      const now = performance.now();
-      const sinceLast = now - lastPacketAt;
-      let steer = targetSteer;
-      if (lastPacketAt > 0 && sinceLast > NEUTRAL_MS) steer = 0;
-      cube.rotation.y += steer * 0.06; // steering turns the cube; not real kart physics, just a feel test
-      cube.rotation.z = -steer * 0.3;
-      renderer.render(scene, camera);
-    }
-    animate();
-
-    // --- disconnect overlay ---
-    const overlay = document.getElementById("overlay");
-    setInterval(() => {
-      if (lastPacketAt > 0 && performance.now() - lastPacketAt > NEUTRAL_MS) {
-        overlay.style.display = "flex";
-      } else {
-        overlay.style.display = "none";
-      }
-    }, 150);
-
-    // --- latency tracking (p95 over a rolling window) ---
-    const latencies = [];
-    function recordLatency(ms) {
-      latencies.push(ms);
-      if (latencies.length > 200) latencies.shift();
-      const sorted = [...latencies].sort((a, b) => a - b);
-      const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95));
-      const p95 = sorted[idx];
-      const el = document.getElementById("p95");
-      el.textContent = `${p95.toFixed(1)} ms`;
-      el.className = "v " + (p95 < 30 ? "ok" : p95 < 60 ? "warn" : "bad");
-    }
-
-    // --- websocket ---
-    const ws = new WebSocket(`ws://${location.host}`);
-    ws.addEventListener("open", () => {
-      ws.send(JSON.stringify({ type: "hello", role: "host" }));
-      document.getElementById("conn").textContent = "host online";
-      setInterval(() => ws.send(JSON.stringify({ type: "ping", t: performance.now() })), 1000);
-    });
-    ws.addEventListener("message", (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === "pong") {
-        const rtt = performance.now() - msg.t;
-        const el = document.getElementById("rtt");
-        el.textContent = `${rtt.toFixed(1)} ms`;
-        el.className = "v " + (rtt < 40 ? "ok" : rtt < 100 ? "warn" : "bad");
-      } else if (msg.type === "controller-joined") {
-        document.getElementById("conn").textContent = "controller connected";
-      } else if (msg.type === "controller-left") {
-        document.getElementById("conn").textContent = "controller left";
-      } else if (msg.type === "input") {
-        const now = performance.now();
-        lastPacketAt = now;
-        packetCount++;
-        document.getElementById("pkts").textContent = packetCount;
-        targetSteer = msg.steer / 32767;
-        // Latency = time from phone send (Date.now()) to host receive (Date.now()).
-        // Clocks aren't synced across devices, so this is an estimate; the ping/pong
-        // RTT stat above is the reliable cross-clock number. We still surface this
-        // one-way estimate because it's what the p95 exit criteria is measured against
-        // once phone and host clocks are close enough (same LAN, NTP-synced devices).
-        const oneWay = Date.now() - msg.t;
-        if (oneWay >= 0 && oneWay < 1000) recordLatency(oneWay);
-      }
-    });
-    ws.addEventListener("close", () => {
-      document.getElementById("conn").textContent = "server disconnected";
-    });
-  </script>
+  <script src="shared/visual-config.js"></script>
+  <script src="host.js"></script>
 </body>
 </html>

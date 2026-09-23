@@ -1,0 +1,377 @@
+<title>Tilt Mood Board</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Poppins:wght@400;600;800&family=Space+Mono:wght@400;700&display=swap');
+
+  :root {
+    --ink: #241934;
+    --ink-soft: #4a3866;
+    --cream: #fff7ec;
+    --paper: #fffdf8;
+    --coral: #ff5d3a;
+    --mint: #16b586;
+    --mint-bright: #2fe6a0;
+    --sky: #3a7bff;
+    --sun: #ffc53d;
+    --line: rgba(36, 25, 52, 0.14);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--cream);
+    background-image:
+      repeating-linear-gradient(115deg, transparent 0 64px, rgba(36,25,52,0.035) 64px 68px);
+    color: var(--ink);
+    font-family: 'Poppins', system-ui, sans-serif;
+    padding: 56px 24px 80px;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  /* ---------- Header ---------- */
+  header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    flex-wrap: wrap;
+    border-bottom: 4px solid var(--ink);
+    padding-bottom: 22px;
+    margin-bottom: 40px;
+  }
+
+  .wordmark {
+    font-family: 'Luckiest Guy', cursive;
+    font-size: clamp(48px, 8vw, 96px);
+    line-height: 0.9;
+    color: var(--coral);
+    -webkit-text-stroke: 2.5px var(--ink);
+    text-shadow: 5px 5px 0 var(--ink);
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+  }
+
+  .kicker {
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0 0 6px;
+  }
+
+  .stamp {
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: var(--ink);
+    color: var(--cream);
+    padding: 8px 14px;
+    border-radius: 999px;
+    white-space: nowrap;
+    transform: rotate(-2deg);
+  }
+
+  /* ---------- Section shell ---------- */
+  section { margin-bottom: 56px; }
+
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .section-num {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    color: var(--coral);
+    font-weight: 700;
+  }
+
+  h2 {
+    font-family: 'Luckiest Guy', cursive;
+    font-weight: 400;
+    font-size: 28px;
+    margin: 0;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  p.lede {
+    max-width: 62ch;
+    color: var(--ink-soft);
+    line-height: 1.6;
+    margin: 0 0 4px;
+  }
+
+  /* ---------- Signals checklist ---------- */
+  .signals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-top: 20px;
+  }
+
+  .signal {
+    background: var(--paper);
+    border: 2.5px solid var(--ink);
+    border-radius: 14px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 4px 4px 0 var(--line);
+  }
+
+  .signal .n {
+    font-family: 'Luckiest Guy', cursive;
+    font-size: 20px;
+    color: var(--sky);
+    width: 26px;
+    flex: none;
+  }
+
+  .signal .t { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+
+  /* ---------- Palette ---------- */
+  .chips {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 16px;
+  }
+
+  .chip {
+    border-radius: 16px;
+    overflow: hidden;
+    border: 2.5px solid var(--ink);
+    box-shadow: 5px 5px 0 var(--line);
+    background: var(--paper);
+  }
+
+  .chip .swatch { height: 84px; }
+
+  .chip .label {
+    padding: 10px 12px 12px;
+    font-family: 'Space Mono', monospace;
+  }
+
+  .chip .name {
+    font-family: 'Poppins', sans-serif;
+    font-weight: 800;
+    font-size: 13.5px;
+    margin: 0 0 2px;
+  }
+
+  .chip .hex {
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.03em;
+  }
+
+  .chip .role {
+    font-size: 10.5px;
+    color: var(--ink-soft);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* ---------- Type specimen ---------- */
+  .type-block {
+    background: var(--paper);
+    border: 2.5px solid var(--ink);
+    border-radius: 18px;
+    padding: 28px 30px;
+    box-shadow: 6px 6px 0 var(--line);
+  }
+
+  .type-row { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; margin-bottom: 22px; }
+  .type-row:last-child { margin-bottom: 0; }
+
+  .type-tag {
+    font-family: 'Space Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--coral);
+    font-weight: 700;
+    width: 108px;
+    flex: none;
+  }
+
+  .display-specimen {
+    font-family: 'Luckiest Guy', cursive;
+    font-size: clamp(30px, 5vw, 46px);
+    color: var(--ink);
+    line-height: 1;
+  }
+  .display-specimen span { color: var(--coral); }
+
+  .body-specimen { font-family: 'Poppins', sans-serif; font-size: 16px; line-height: 1.65; color: var(--ink); max-width: 56ch; }
+  .body-specimen b { font-weight: 800; }
+
+  .mono-specimen {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    background: var(--ink);
+    color: var(--mint-bright);
+    padding: 8px 12px;
+    border-radius: 8px;
+    display: inline-block;
+  }
+
+  /* ---------- References ---------- */
+  .refs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+  }
+
+  .ref-card {
+    background: var(--paper);
+    border: 2.5px solid var(--ink);
+    border-radius: 14px;
+    padding: 16px 18px;
+    box-shadow: 4px 4px 0 var(--line);
+  }
+
+  .ref-card .title {
+    font-weight: 800;
+    font-size: 14.5px;
+    margin: 0 0 6px;
+  }
+
+  .ref-card .borrow {
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .ref-card .borrow b { color: var(--ink); }
+
+  /* ---------- Footer note ---------- */
+  footer {
+    border-top: 4px solid var(--ink);
+    padding-top: 18px;
+    margin-top: 8px;
+    font-family: 'Space Mono', monospace;
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.02em;
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div>
+      <p class="kicker">Project Tilt · Visual Identity</p>
+      <div class="wordmark">TILT</div>
+    </div>
+    <div class="stamp">Style locked before build</div>
+  </header>
+
+  <section>
+    <div class="section-head"><span class="section-num">01</span><h2>What reads as "kart game"</h2></div>
+    <p class="lede">Five signals a player checks for in the first two seconds. Every workstream below exists to put a checkmark on one of these.</p>
+    <div class="signals">
+      <div class="signal"><span class="n">1</span><span class="t">Kart silhouette — big wheels, small body, a driver</span></div>
+      <div class="signal"><span class="n">2</span><span class="t">Motion that reacts to input — roll, wheel spin, bounce</span></div>
+      <div class="signal"><span class="n">3</span><span class="t">A camera that sells speed</span></div>
+      <div class="signal"><span class="n">4</span><span class="t">Feedback effects — sparks, smoke, boost flame</span></div>
+      <div class="signal"><span class="n">5</span><span class="t">A game-style HUD, not default UI</span></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="section-num">02</span><h2>Palette — six colors</h2></div>
+    <p class="lede">Bright and saturated so it survives split-screen. Ink and cream do the heavy lifting; the four accents are rationed to callouts, boost tiers, and UI state — never all at once on one surface.</p>
+    <div class="chips" style="margin-top:20px;">
+      <div class="chip">
+        <div class="swatch" style="background:var(--ink);"></div>
+        <div class="label"><p class="name">Track Ink</p><p class="hex">#241934</p><p class="role">Outlines, shadows, HUD frame</p></div>
+      </div>
+      <div class="chip">
+        <div class="swatch" style="background:var(--cream);"></div>
+        <div class="label"><p class="name">Paddock Cream</p><p class="hex">#FFF7EC</p><p class="role">Base ground, negative space</p></div>
+      </div>
+      <div class="chip">
+        <div class="swatch" style="background:var(--coral);"></div>
+        <div class="label"><p class="name">Coral Boost</p><p class="hex">#FF5D3A</p><p class="role">Primary accent, boost flame, P1</p></div>
+      </div>
+      <div class="chip">
+        <div class="swatch" style="background:var(--mint-bright);"></div>
+        <div class="label"><p class="name">Mint Turbo</p><p class="hex">#2FE6A0</p><p class="role">Mini-turbo tier 1, track ribbon</p></div>
+      </div>
+      <div class="chip">
+        <div class="swatch" style="background:var(--sky);"></div>
+        <div class="label"><p class="name">Circuit Sky</p><p class="hex">#3A7BFF</p><p class="role">Skybox, P2, cool shadows</p></div>
+      </div>
+      <div class="chip">
+        <div class="swatch" style="background:var(--sun);"></div>
+        <div class="label"><p class="name">Grid Sun</p><p class="hex">#FFC53D</p><p class="role">Boost pads, coins, countdown</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="section-num">03</span><h2>Type — three roles</h2></div>
+    <div class="type-block">
+      <div class="type-row">
+        <span class="type-tag">Display</span>
+        <div class="display-specimen">3&nbsp;·&nbsp;2&nbsp;·&nbsp;1&nbsp;·&nbsp;<span>GO!</span></div>
+      </div>
+      <div class="type-row">
+        <span class="type-tag">Display / HUD</span>
+        <div class="display-specimen" style="font-size:clamp(20px,3vw,26px);">1ST&nbsp;&nbsp;LAP&nbsp;2/3&nbsp;&nbsp;<span>+2</span></div>
+      </div>
+      <div class="type-row">
+        <span class="type-tag">Body</span>
+        <p class="body-specimen">Luckiest Guy carries countdowns, positions and podium screens — <b>big, chunky, built to read at a glance</b> from across the couch. Poppins handles everything a player actually reads: menus, lobby copy, settings.</p>
+      </div>
+      <div class="type-row">
+        <span class="type-tag">Utility / Spec</span>
+        <span class="mono-specimen">kart_body.glb · 4,820 tris · KTX2</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="section-num">04</span><h2>Genre references</h2></div>
+    <p class="lede">Touchstones for tone and technique only — Tilt's characters, tracks and names stay original.</p>
+    <div class="refs">
+      <div class="ref-card">
+        <p class="title">Crash Team Racing Nitro-Fueled</p>
+        <p class="borrow"><b>Borrowing:</b> chunky proportions, readable drift-spark color tiers</p>
+      </div>
+      <div class="ref-card">
+        <p class="title">Team Sonic Racing</p>
+        <p class="borrow"><b>Borrowing:</b> saturated flat lighting that still reads in split-screen</p>
+      </div>
+      <div class="ref-card">
+        <p class="title">Sonic &amp; All-Stars Racing Transformed</p>
+        <p class="borrow"><b>Borrowing:</b> camera FOV push and speed-line vignette at top speed</p>
+      </div>
+      <div class="ref-card">
+        <p class="title">Fall Guys</p>
+        <p class="borrow"><b>Borrowing:</b> soft toon outlines on low-poly geometry, squash-and-stretch</p>
+      </div>
+      <div class="ref-card">
+        <p class="title">Overcooked</p>
+        <p class="borrow"><b>Borrowing:</b> party-game HUD energy — big numerals, no chrome</p>
+      </div>
+      <div class="ref-card">
+        <p class="title">Sunset Overdrive</p>
+        <p class="borrow"><b>Borrowing:</b> punchy per-scene color grading LUTs</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    "Mario Kart style" describes the genre only. Assets, characters and track names are original — genre reference here informs tone and technique, not content to copy.
+  </footer>
+
+</div>

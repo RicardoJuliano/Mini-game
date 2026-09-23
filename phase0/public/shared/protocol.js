@@ -1,42 +1,39 @@
-// Shared between controller.html and host.html.
-// Keeps input shaping identical on both ends and defines the wire format.
+// Shared between controller.html and host.html: tunable constants (section 8 of the
+// steering/pedals spec), steering math, and the wire-packet helpers.
 (function (global) {
-  const MAX_ANGLE = 90; // degrees of phone rotation mapped to full steering lock
-  const DEAD_ZONE = 0.04; // ignore the innermost 4% of the range
-  const CURVE_EXPONENT = 1.5; // >1 => small corrections are more precise, full lock still reachable
+  const TILT_CONFIG = {
+    MAX_TILT: 50,             // degrees of sideways tilt for full lock (player setting, 30-80)
+    DEAD_ZONE: 0.05,          // ignore tiny tilts
+    CURVE: 1.3,               // >1 = finer control near center
+    ONE_EURO_MIN_CUTOFF: 1.0, // lower = smoother when the phone is nearly still
+    ONE_EURO_BETA: 0.02,      // higher = less lag on fast turns
+    ONE_EURO_D_CUTOFF: 1.0,
+  };
 
-  function wrap180(deg) {
-    let d = deg % 360;
-    if (d > 180) d -= 360;
-    if (d < -180) d += 360;
-    return d;
-  }
+  const VEHICLE_CONFIG = {
+    MAX_FWD: 26,        // units/sec — raised from 14: at the old speed nothing looked like it was moving
+    MAX_REV: 7,         // units/sec (~27% of forward)
+    ACCEL: 30,          // reaches top speed in ~1.2s
+    BRAKE: 30,
+    REV_ACCEL: 10,
+    COAST: 10,          // rolling friction when nothing is held
+    STOP_EPS: 0.2,      // "stopped" threshold
+    REVERSE_DELAY: 0.2, // seconds holding brake at standstill before reverse kicks in
+    TURN_RATE: 2.6,     // rad/sec at REF_SPEED — a touch higher so corners stay possible at the new speed
+    REF_SPEED: 9,       // speed at which steering reaches full TURN_RATE
+  };
 
-  // Maps a normalized [-1, 1] raw value through dead zone + response curve.
-  function shape(raw) {
-    const clamped = Math.max(-1, Math.min(1, raw));
-    const mag = Math.abs(clamped);
-    if (mag < DEAD_ZONE) return 0;
-    const rescaled = (mag - DEAD_ZONE) / (1 - DEAD_ZONE);
-    const shaped = Math.pow(rescaled, CURVE_EXPONENT);
-    return Math.sign(clamped) * shaped;
-  }
-
-  // buttons bitmask
   const BUTTONS = { GAS: 1 << 0, BRAKE: 1 << 1, DRIFT: 1 << 2, ITEM: 1 << 3, PAUSE: 1 << 4 };
 
-  // Complementary filter: gyro for responsiveness, gravity vector to correct drift.
-  // Returns a new fused angle (degrees, wrapped to [-180, 180], relative to `center`).
-  function fuseAngle(prevAngle, gyroAlphaDegPerSec, dt, gravity, center) {
-    const gyroAngle = prevAngle + (gyroAlphaDegPerSec || 0) * dt;
-    let tiltAngle = prevAngle;
-    if (gravity && (gravity.x !== null || gravity.y !== null)) {
-      const rawDeg = (Math.atan2(gravity.y || 0, gravity.x || 0) * 180) / Math.PI;
-      tiltAngle = wrap180(rawDeg - center);
-    }
-    const gMag = gravity ? Math.hypot(gravity.x || 0, gravity.y || 0, gravity.z || 0) : 9.81;
-    const trust = 0.02 * Math.min(1, gMag / 9.81);
-    return wrap180((1 - trust) * gyroAngle + trust * tiltAngle);
+  // Dead zone + response curve so small corrections are precise and full lock is still reachable.
+  function shape(raw, deadZone, curve) {
+    deadZone = deadZone === undefined ? TILT_CONFIG.DEAD_ZONE : deadZone;
+    curve = curve === undefined ? TILT_CONFIG.CURVE : curve;
+    const clamped = Math.max(-1, Math.min(1, raw));
+    const mag = Math.abs(clamped);
+    if (mag < deadZone) return 0;
+    const rescaled = (mag - deadZone) / (1 - deadZone);
+    return Math.sign(clamped) * Math.pow(rescaled, curve);
   }
 
   function encodeInput(seq, steerNormalized, buttons) {
@@ -44,7 +41,66 @@
     return { type: 1, seq, steer: steer16, buttons: buttons | 0, t: Date.now() };
   }
 
-  const api = { MAX_ANGLE, DEAD_ZONE, CURVE_EXPONENT, wrap180, shape, fuseAngle, encodeInput, BUTTONS };
+  // --- lateral-tilt-only steering ---
+  // Sideways tilt is read from the gravity component along the phone's horizontal
+  // screen axis. Tilting forward/backward rotates the phone around that same axis,
+  // so that component doesn't change — steering is immune to pitch with no extra logic.
+  const IS_IOS = typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function";
+
+  function screenAngle() {
+    const a = (typeof screen !== "undefined" && screen.orientation)
+      ? screen.orientation.angle
+      : (typeof window !== "undefined" ? window.orientation : 0) || 0;
+    return ((a % 360) + 360) % 360;
+  }
+
+  // Returns sideways tilt in degrees: 0 = level, positive = tilted right.
+  // iOS Safari reports accelerationIncludingGravity with the opposite sign of Android
+  // Chrome; the iOS permission API only exists on iOS, so it doubles as the platform check.
+  function lateralTiltDeg(g) {
+    const s = IS_IOS ? -1 : 1;
+    const gx = s * (g.x || 0), gy = s * (g.y || 0), gz = s * (g.z || 0);
+    const mag = Math.hypot(gx, gy, gz) || 9.81;
+    const a = screenAngle();
+    const lateral = a === 90 ? -gy : a === 270 ? gy : a === 180 ? -gx : gx;
+    return (Math.asin(Math.max(-1, Math.min(1, lateral / mag))) * 180) / Math.PI;
+  }
+
+  // --- One Euro filter: smooths hand shake when still, stays responsive on fast turns ---
+  class LowPass {
+    constructor() { this.y = null; }
+    filter(x, a) { this.y = this.y === null ? x : a * x + (1 - a) * this.y; return this.y; }
+  }
+
+  class OneEuro {
+    constructor(minCutoff, beta, dCutoff) {
+      this.minCutoff = minCutoff === undefined ? TILT_CONFIG.ONE_EURO_MIN_CUTOFF : minCutoff;
+      this.beta = beta === undefined ? TILT_CONFIG.ONE_EURO_BETA : beta;
+      this.dCutoff = dCutoff === undefined ? TILT_CONFIG.ONE_EURO_D_CUTOFF : dCutoff;
+      this.x = new LowPass();
+      this.dx = new LowPass();
+      this.last = null;
+    }
+    alpha(cutoff, dt) {
+      const tau = 1 / (2 * Math.PI * cutoff);
+      return 1 / (1 + tau / dt);
+    }
+    filter(value, t) {
+      const dt = this.last === null ? 1 / 60 : Math.max(1e-3, t - this.last);
+      this.last = t;
+      const prev = this.x.y === null ? value : this.x.y;
+      const d = this.dx.filter((value - prev) / dt, this.alpha(this.dCutoff, dt));
+      const cutoff = this.minCutoff + this.beta * Math.abs(d);
+      return this.x.filter(value, this.alpha(cutoff, dt));
+    }
+  }
+
+  const api = {
+    TILT_CONFIG, VEHICLE_CONFIG, BUTTONS,
+    shape, encodeInput,
+    lateralTiltDeg, screenAngle,
+    OneEuro, LowPass,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else global.TiltProtocol = api;
 })(typeof window !== "undefined" ? window : globalThis);
