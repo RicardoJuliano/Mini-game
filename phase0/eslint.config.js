@@ -1,7 +1,7 @@
 module.exports = [
   {
     // Vendored, unmodified third-party builds — not our code, not worth linting.
-    ignores: ["public/shared/three.min.js", "public/shared/qrcode.min.js"],
+    ignores: ["public/shared/three.min.js", "public/shared/qrcode.min.js", "public/shared/postprocessing/**", "public/shared/loaders/**"],
   },
   {
     files: ["public/**/*.js"],

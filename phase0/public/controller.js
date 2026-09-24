@@ -6,6 +6,11 @@ const rotateOverlay = document.getElementById("rotate-overlay");
 const wheelGraphic = document.getElementById("wheel-graphic");
 const debugReadout = document.getElementById("debug-readout");
 const connBadge = document.getElementById("conn-badge");
+const connText = document.getElementById("conn-text");
+function setConnStatus(text, connected) {
+  connText.textContent = text;
+  connBadge.classList.toggle("connected", !!connected);
+}
 const DEBUG = new URLSearchParams(location.search).has("debug");
 if (DEBUG) debugReadout.style.display = "block";
 
@@ -95,16 +100,16 @@ function connect() {
   ws.addEventListener("open", () => {
     reconnectAttempts = 0;
     ws.send(JSON.stringify({ type: "hello", role: "controller" }));
-    connBadge.textContent = "connected";
+    setConnStatus("conectado", true);
   });
   ws.addEventListener("close", () => {
-    connBadge.textContent = "reconnecting…";
+    setConnStatus("reconectando…", false);
     const delay = Math.min(1000 * 2 ** reconnectAttempts++, 8000);
     setTimeout(connect, delay);
   });
   ws.addEventListener("message", (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === "host-ready") connBadge.textContent = "connected";
+    if (msg.type === "host-ready") setConnStatus("conectado", true);
   });
 }
 

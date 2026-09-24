@@ -2,6 +2,7 @@
 // DOM refs
 // ===================================================================
 const DEBUG = new URLSearchParams(location.search).has("debug");
+const QUALITY_LOW = new URLSearchParams(location.search).get("quality") === "low"; // disables post FX, shadows, halves particle pools
 const panelEl = document.getElementById("panel");
 if (DEBUG) panelEl.style.display = "block";
 
@@ -69,9 +70,45 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = !QUALITY_LOW;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 sceneEl.appendChild(renderer.domElement);
+
+// ===================================================================
+// Post-processing (plan v3 §2.4): UnrealBloomPass on bright things only (brake
+// lights, boost flames, sparks), plus a custom radial blur driven by speed.
+// Skipped entirely under ?quality=low.
+// ===================================================================
+const RadialBlurShader = {
+  uniforms: { tDiffuse: { value: null }, strength: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float strength; varying vec2 vUv;
+    void main(){
+      vec2 dir = vUv - 0.5;
+      vec4 c = vec4(0.0);
+      for (int i = 0; i < 8; i++) {
+        float t = float(i) / 7.0;
+        c += texture2D(tDiffuse, vUv - dir * strength * t * 0.08);
+      }
+      gl_FragColor = c / 8.0;
+    }`,
+};
+
+let composer = null, radialBlurPass = null;
+if (!QUALITY_LOW) {
+  composer = new THREE.EffectComposer(renderer);
+  composer.addPass(new THREE.RenderPass(scene, camera));
+  // Threshold is tuned lower than the plan's suggested 0.85: our brake lights are a pure
+  // red emissive, and standard luminance weighting (0.299/0.587/0.114) puts pure red at
+  // ~0.3, never crossing a high threshold. Bloom-source materials are also marked
+  // toneMapped=false below so they read as reliably "bright" regardless of exposure.
+  const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.4, 0.55);
+  composer.addPass(bloomPass);
+  radialBlurPass = new THREE.ShaderPass(RadialBlurShader);
+  radialBlurPass.renderToScreen = true;
+  composer.addPass(radialBlurPass);
+}
 
 // Ground layers sit only centimeters apart in Y; on their own the GPU can't reliably
 // tell which wins at distance, so every layer above grass also gets a polygon offset.
@@ -155,6 +192,36 @@ const grassMesh = new THREE.Mesh(new THREE.PlaneGeometry(320, 320), toon(PALETTE
 grassMesh.rotation.x = -Math.PI / 2;
 grassMesh.receiveShadow = true;
 scene.add(grassMesh);
+
+// ===================================================================
+// Clouds: slow-drifting billboard sprites (plan v3 §4.2)
+// ===================================================================
+function cloudTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(32, 32, 2, 32, 32, 30);
+  g.addColorStop(0, "rgba(255,255,255,0.9)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+const cloudTex = cloudTexture();
+const clouds = Array.from({ length: 14 }, () => {
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: cloudTex, transparent: true, opacity: 0.5, fog: false, depthWrite: false }));
+  const scale = 18 + Math.random() * 20;
+  sprite.scale.set(scale, scale * 0.5, 1);
+  sprite.position.set((Math.random() - 0.5) * 400, 60 + Math.random() * 50, (Math.random() - 0.5) * 400);
+  scene.add(sprite);
+  return { sprite, speed: 0.6 + Math.random() * 0.8 };
+});
+function updateClouds(dt) {
+  clouds.forEach((c) => {
+    c.sprite.position.x += c.speed * dt;
+    if (c.sprite.position.x > 220) c.sprite.position.x = -220;
+  });
+}
 
 // ===================================================================
 // Track: closed Catmull-Rom spline, road + curbs + start line + barriers + trees (step 4)
@@ -266,13 +333,14 @@ let startPlane;
   scene.add(barrierMesh);
 }
 
-// Trees: instanced cone + cylinder, scattered outside the track
+// Trees: instanced cone + cylinder, scattered outside the track. The canopy (leafMesh)
+// sways each frame (plan v3 §4.2); the trunk stays static since it's cheap and unnoticeable.
+const treeLeafMesh = new THREE.InstancedMesh(new THREE.ConeGeometry(0.9, 1.8, 7), toon(PALETTE.mint), WORLD.treeCount);
+const treeData = []; // { x, z, scale, phase } — needed each frame to recompute leaf sway
 {
   const trunkGeo = new THREE.CylinderGeometry(0.15, 0.18, 0.9, 6);
-  const leafGeo = new THREE.ConeGeometry(0.9, 1.8, 7);
   const trunkMesh = new THREE.InstancedMesh(trunkGeo, toon(PALETTE.asphalt), WORLD.treeCount);
-  const leafMesh = new THREE.InstancedMesh(leafGeo, toon(PALETTE.mint), WORLD.treeCount);
-  trunkMesh.castShadow = leafMesh.castShadow = true;
+  trunkMesh.castShadow = treeLeafMesh.castShadow = true;
   const dummy = new THREE.Object3D();
   let placed = 0, guard = 0;
   while (placed < WORLD.treeCount && guard < WORLD.treeCount * 20) {
@@ -289,15 +357,26 @@ let startPlane;
     const scale = 0.7 + Math.random() * 0.6;
     dummy.position.set(x, 0.45 * scale, z);
     dummy.scale.setScalar(scale);
+    dummy.rotation.set(0, 0, 0);
     dummy.updateMatrix();
     trunkMesh.setMatrixAt(placed, dummy.matrix);
-    dummy.position.y = 1.55 * scale;
-    dummy.updateMatrix();
-    leafMesh.setMatrixAt(placed, dummy.matrix);
+    treeData.push({ x, z, scale, phase: Math.random() * Math.PI * 2 });
     placed++;
   }
   scene.add(trunkMesh);
-  scene.add(leafMesh);
+  scene.add(treeLeafMesh);
+}
+function updateTreeSway(now) {
+  const dummy = new THREE.Object3D();
+  treeData.forEach((t, i) => {
+    dummy.position.set(t.x, 1.55 * t.scale, t.z);
+    dummy.scale.setScalar(t.scale);
+    dummy.rotation.z = Math.sin(now / 1400 + t.phase) * 0.06;
+    dummy.rotation.x = Math.cos(now / 1700 + t.phase) * 0.04;
+    dummy.updateMatrix();
+    treeLeafMesh.setMatrixAt(i, dummy.matrix);
+  });
+  treeLeafMesh.instanceMatrix.needsUpdate = true;
 }
 
 // Flicker-isolation keys (?debug=1 only): hide one layer at a time to find which
@@ -363,6 +442,9 @@ const sampleSpacing = trackLength / TRACK.samples;
 }
 
 // Start/finish gantry: passing under something overhead is a strong speed cue.
+// Also carries the 3 countdown lights (plan v3 §4.3) and two waving flags (§4.2).
+const gantryLights = [];
+const gantryFlags = [];
 {
   const postGeo = new THREE.BoxGeometry(0.5, 4.5, 0.5);
   const beamGeo = new THREE.BoxGeometry(TRACK.roadWidth + TRACK.curbWidth * 2 + 1, 0.6, 0.5);
@@ -375,26 +457,155 @@ const sampleSpacing = trackLength / TRACK.samples;
   rightPost.position.set(HALF_ROAD + TRACK.curbWidth + 0.5, 2.25, 0);
   beam.position.set(0, 4.4, 0);
   [leftPost, rightPost, beam].forEach((m) => { m.castShadow = true; gantry.add(m); });
+
+  const lightGeo = new THREE.SphereGeometry(0.16, 10, 8);
+  [-0.7, 0, 0.7].forEach((lx) => {
+    const light = new THREE.Mesh(lightGeo, new THREE.MeshStandardMaterial({ color: 0x330000, emissive: 0x000000 }));
+    light.position.set(lx, 4.1, 0.3);
+    gantry.add(light);
+    gantryLights.push(light);
+  });
+
+  const flagGeo = new THREE.PlaneGeometry(0.5, 0.35, 4, 1);
+  [-(HALF_ROAD + TRACK.curbWidth + 0.5), HALF_ROAD + TRACK.curbWidth + 0.5].forEach((fx) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(fx, 4.3, 0);
+    const flag = new THREE.Mesh(flagGeo, new THREE.MeshBasicMaterial({ color: col(PALETTE.chalk), side: THREE.DoubleSide }));
+    flag.position.x = 0.25 * Math.sign(fx || 1);
+    pivot.add(flag);
+    gantry.add(pivot);
+    gantryFlags.push(pivot);
+  });
+
   const t0 = tangents[0];
   gantry.position.copy(samples[0]);
   gantry.rotation.y = Math.atan2(t0.x, t0.z);
   scene.add(gantry);
 }
+function setGantryLights(litCount, allGreen) {
+  gantryLights.forEach((light, i) => {
+    const on = allGreen || i < litCount;
+    const hex = allGreen ? 0x2fe6a0 : 0xff3030;
+    light.material.color.setHex(on ? hex : 0x330000);
+    light.material.emissive.setHex(on ? hex : 0x000000);
+  });
+}
+function updateGantryFlags(now) {
+  gantryFlags.forEach((pivot, i) => {
+    pivot.rotation.y = Math.sin(now / 260 + i * 2) * 0.5;
+  });
+}
+
+// ===================================================================
+// GLB landmarks (plan v3 §3.1/3.3): Kenney Racing Kit, CC0 — see CREDITS.md.
+// Loaded async; a failed load logs a warning and is skipped, never breaks the game
+// (there's no way to visually confirm these placements from here, so this stays defensive).
+// ===================================================================
+const gltfLoader = new THREE.GLTFLoader();
+// The pack's materials are flat/unlit and named — only retarget the neutral/accent ones
+// toward the mood-board palette; leave "road"/"glass" as shipped (see CREDITS.md).
+const KENNEY_RECOLOR = { grey: PALETTE.chalk, red: PALETTE.coral, grass: PALETTE.mint };
+
+function loadGLB(path) {
+  return new Promise((resolve, reject) => {
+    gltfLoader.load(`shared/models/${path}`, (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+}
+
+function recolorKenneyModel(root) {
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    child.castShadow = true;
+    child.receiveShadow = true;
+    const target = KENNEY_RECOLOR[child.material.name];
+    if (target) {
+      child.material = child.material.clone(); // don't mutate a material shared with sibling instances
+      child.material.color.copy(col(target));
+    }
+  });
+}
+
+// Grandstand: the model is one ~1-unit tile, meant to be tiled — 6 copies scaled up
+// and lined up along the start straight, set back behind the outer curb.
+loadGLB("grandStand.glb").then((base) => {
+  const t0 = tangents[0], n0 = new THREE.Vector3(-t0.z, 0, t0.x).normalize();
+  const standScale = 3, tileCount = 6;
+  const standCenter = samples[0].clone().addScaledVector(n0, HALF_ROAD + TRACK.curbWidth + 5);
+  const facingAngle = Math.atan2(-n0.x, -n0.z); // face back toward the track
+  for (let i = 0; i < tileCount; i++) {
+    const tile = base.clone(true);
+    recolorKenneyModel(tile);
+    tile.scale.setScalar(standScale);
+    tile.position.copy(standCenter).addScaledVector(t0, (i - (tileCount - 1) / 2) * standScale);
+    tile.rotation.y = facingAngle;
+    scene.add(tile);
+  }
+}).catch((err) => console.warn("grandStand.glb failed to load, skipping:", err));
+
+// Pit tent: planted just past one end of the grandstand.
+loadGLB("tentRoofDouble.glb").then((tent) => {
+  recolorKenneyModel(tent);
+  const t0 = tangents[0], n0 = new THREE.Vector3(-t0.z, 0, t0.x).normalize();
+  const scale = 2.5;
+  tent.scale.setScalar(scale);
+  tent.position.copy(samples[0])
+    .addScaledVector(n0, HALF_ROAD + TRACK.curbWidth + 5)
+    .addScaledVector(t0, -3 * 3 - 4); // past the grandstand's near end (standScale=3, half tileCount*standScale)
+  tent.rotation.y = Math.atan2(t0.x, t0.z);
+  scene.add(tent);
+}).catch((err) => console.warn("tentRoofDouble.glb failed to load, skipping:", err));
+
+// Checkered flags at a few of the sharpest corners — also doubles as a braking reference.
+loadGLB("flagCheckers.glb").then((base) => {
+  const corners = [];
+  for (let i = 0; i < TRACK.samples; i += 8) {
+    const a = tangents[(i + 6) % TRACK.samples], b = tangents[(i - 6 + TRACK.samples) % TRACK.samples];
+    if (Math.abs(a.x * b.z - a.z * b.x) > 0.15) corners.push(i);
+  }
+  const picked = [];
+  corners.forEach((i) => { if (!picked.some((p) => Math.abs(p - i) < 40)) picked.push(i); });
+  picked.slice(0, 4).forEach((i) => {
+    const p = samples[i], t = tangents[i];
+    const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
+    const flag = base.clone(true);
+    recolorKenneyModel(flag);
+    flag.scale.setScalar(2.2);
+    flag.position.copy(p).addScaledVector(n, HALF_ROAD + TRACK.curbWidth + 1.4);
+    flag.rotation.y = Math.atan2(t.x, t.z);
+    scene.add(flag);
+  });
+}).catch((err) => console.warn("flagCheckers.glb failed to load, skipping:", err));
 
 // Boost pads (plan v3 §5.5): placed off the obvious racing line, so taking one is a choice.
 const BOOST_PADS = TiltVisualConfig.BOOST_PADS;
+// Scrolling arrow texture (plan v3 §4.2) — a chevron repeated down the pad, offset animated each frame.
+function boostArrowTexture() {
+  const c = document.createElement("canvas");
+  c.width = 32; c.height = 32;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = PALETTE.sun; ctx.fillRect(0, 0, 32, 32);
+  ctx.strokeStyle = PALETTE.ink; ctx.lineWidth = 5; ctx.lineJoin = "round";
+  ctx.beginPath(); ctx.moveTo(6, 6); ctx.lineTo(16, 20); ctx.lineTo(26, 6); ctx.stroke();
+  const tex = finishTexture(new THREE.CanvasTexture(c));
+  tex.repeat.set(1, 3);
+  return tex;
+}
 const boostPads = BOOST_PADS.spots.map(([frac, lateral]) => {
   const i = Math.round(frac * TRACK.samples) % TRACK.samples;
   const p = samples[i], t = tangents[i];
   const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
   const center = new THREE.Vector3(p.x + n.x * lateral, 0.06, p.z + n.z * lateral);
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 2.4), layered(new THREE.MeshBasicMaterial({ color: col(PALETTE.sun) }), 3));
+  const arrowTex = boostArrowTexture();
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 2.4), layered(new THREE.MeshBasicMaterial({ map: arrowTex }), 3));
   mesh.rotation.x = -Math.PI / 2;
   mesh.rotation.z = Math.atan2(t.x, t.z);
   mesh.position.copy(center);
   scene.add(mesh);
-  return { center, lastTriggeredAt: -Infinity };
+  return { center, lastTriggeredAt: -Infinity, tex: arrowTex };
 });
+function updateBoostPads(dt) {
+  boostPads.forEach((pad) => { pad.tex.offset.y -= dt * 0.6; });
+}
 
 // Nearest-point-on-track query, incremental (fast) with an optional full search.
 let trackIdx = 0;
@@ -426,6 +637,8 @@ const frontWheelGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.24, 16);
 const rearWheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.3, 16);
 const wheelMat = toon(PALETTE.ink);
 const wheels = [];
+const wheelBaseY = [];
+const wheelPhase = [];
 [[-0.6, 0.28, 0.62, frontWheelGeo], [0.6, 0.28, 0.62, frontWheelGeo],
  [-0.66, 0.36, -0.68, rearWheelGeo], [0.66, 0.36, -0.68, rearWheelGeo]].forEach(([x, y, z, geo]) => {
   const w = new THREE.Mesh(geo, wheelMat);
@@ -434,6 +647,8 @@ const wheels = [];
   w.castShadow = true;
   kartRoot.add(w);
   wheels.push(w);
+  wheelBaseY.push(y);
+  wheelPhase.push(Math.random() * Math.PI * 2); // independent per-wheel suspension noise
 });
 const frontWheels = [wheels[0], wheels[1]];
 
@@ -482,6 +697,18 @@ bodyPivot.add(exhaustL, exhaustR);
 const exhaustLocalL = new THREE.Vector3(-0.3, 0.35, -0.95);
 const exhaustLocalR = new THREE.Vector3(0.3, 0.35, -0.95);
 
+// Boost flames: hidden cones at each exhaust pipe, shown + flickered only while boosting
+const flameGeo = new THREE.ConeGeometry(0.07, 0.35, 8);
+const flameMat = new THREE.MeshBasicMaterial({ color: col(PALETTE.sun), transparent: true, toneMapped: false });
+const flameL = new THREE.Mesh(flameGeo, flameMat.clone());
+const flameR = new THREE.Mesh(flameGeo, flameMat.clone());
+[flameL, flameR].forEach((f, i) => {
+  f.rotation.x = Math.PI / 2;
+  f.position.set(i === 0 ? -0.3 : 0.3, 0.35, -1.05);
+  f.visible = false;
+  bodyPivot.add(f);
+});
+
 // Driver: torso + head + helmet + visor
 const driver = new THREE.Group();
 driver.position.set(0, 0.72, -0.15);
@@ -490,6 +717,23 @@ const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.4, 10), to
 torso.position.y = 0.2;
 torso.castShadow = true;
 driver.add(torso);
+
+// Arms: shoulder pivots so rotating the pivot swings the forearm like turning a wheel
+const armGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.32, 6);
+const armMat = toon(PALETTE.dusk);
+const armPivotL = new THREE.Group();
+const armPivotR = new THREE.Group();
+armPivotL.position.set(-0.16, 0.42, 0.18);
+armPivotR.position.set(0.16, 0.42, 0.18);
+[armPivotL, armPivotR].forEach((pivot) => {
+  const arm = new THREE.Mesh(armGeo, armMat);
+  arm.position.set(0, -0.14, 0.1);
+  arm.rotation.x = -Math.PI / 3.2;
+  arm.castShadow = true;
+  pivot.add(arm);
+  driver.add(pivot);
+});
+
 const driverHead = new THREE.Group();
 driverHead.position.y = 0.5;
 driver.add(driverHead);
@@ -508,28 +752,68 @@ driverHead.add(visor);
 const brakeLightGeo = new THREE.BoxGeometry(0.16, 0.1, 0.05);
 const brakeLights = [];
 [[-0.35, 0.5, -0.88], [0.35, 0.5, -0.88]].forEach(([x, y, z]) => {
-  const m = new THREE.Mesh(brakeLightGeo, new THREE.MeshStandardMaterial({ color: 0x400000, emissive: 0x000000 }));
+  const m = new THREE.Mesh(brakeLightGeo, new THREE.MeshStandardMaterial({ color: 0x400000, emissive: 0x000000, toneMapped: false }));
   m.position.set(x, y, z);
   bodyPivot.add(m);
   brakeLights.push(m);
 });
 
-// Procedural body animation (spring toward roll/pitch targets, plus an idle bounce)
-const BODY = { maxRoll: 0.16, maxPitch: 0.08, bounceAmp: 0.025, spring: 10 };
+// Procedural body animation (plan v3 §4.1): spring-driven roll/pitch/squash, per-wheel
+// suspension, driver arms + head follow, boost pitch/flame, wall-hit wobble, idle buzz.
+const BODY = { maxRoll: 0.22, maxPitch: 0.12, bounceAmp: 0.03, spring: 10 };
 let bodyRoll = 0, bodyPitch = 0, prevSpeedForBody = 0;
-function animateBody(dt, steerVal, speedVal) {
+let wallWobbleTimer = 0; // counts down from 1 after a wall hit; drives a damped-sine wobble
+
+function triggerWallWobble() { wallWobbleTimer = 1; }
+
+function animateBody(dt, steerVal, speedVal, isDrifting, isBoosting, isOffroad, driftDirVal) {
   const speedFrac = Math.min(1, Math.abs(speedVal) / V.MAX_FWD);
   const accel = (speedVal - prevSpeedForBody) / Math.max(dt, 1e-3);
   prevSpeedForBody = speedVal;
+  const now = performance.now();
 
   const k = 1 - Math.exp(-BODY.spring * dt);
-  bodyRoll += (-steerVal * speedFrac * BODY.maxRoll - bodyRoll) * k;
-  bodyPitch += (THREE.MathUtils.clamp(-accel / 40, -1, 1) * BODY.maxPitch - bodyPitch) * k;
+  const rollTarget = isDrifting ? -driftDirVal * 0.9 : -steerVal * speedFrac; // lean hard into a drift
+  bodyRoll += (rollTarget * BODY.maxRoll - bodyRoll) * k;
+  const pitchTarget = isBoosting ? -0.6 : THREE.MathUtils.clamp(-accel / 40, -1, 1);
+  bodyPitch += (pitchTarget * BODY.maxPitch - bodyPitch) * k;
 
-  bodyPivot.rotation.z = bodyRoll;
+  // Wall hit: a short damped-sine wobble layered on top of the spring animation.
+  wallWobbleTimer = Math.max(0, wallWobbleTimer - dt * 2.2);
+  const wobble = Math.sin(wallWobbleTimer * Math.PI * 6) * wallWobbleTimer * 0.25;
+  const squash = 1 - wallWobbleTimer * 0.12;
+
+  // Idle vibration: tiny high-frequency buzz whenever the engine is "on" (racing) and near-stopped.
+  const idleBuzz = speedFrac < 0.05 ? Math.sin(now / 35) * 0.006 : 0;
+
+  bodyPivot.rotation.z = bodyRoll + wobble;
   bodyPivot.rotation.x = bodyPitch;
-  bodyPivot.position.y = Math.sin(performance.now() / 90) * BODY.bounceAmp * speedFrac;
-  driverHead.rotation.z = bodyRoll * 1.8;
+  bodyPivot.position.y = Math.sin(now / 90) * BODY.bounceAmp * speedFrac + idleBuzz;
+  bodyPivot.position.x = idleBuzz * 0.6;
+  bodyPivot.scale.set(1 + wallWobbleTimer * 0.05, squash, 1 + wallWobbleTimer * 0.05);
+
+  // Suspension: each wheel bounces on its own noisy phase, more on grass than on the road.
+  const suspAmp = (isOffroad ? 0.03 : 0.012) * (0.4 + speedFrac);
+  wheels.forEach((w, i) => {
+    w.position.y = wheelBaseY[i] + Math.sin(now / 60 + wheelPhase[i]) * suspAmp;
+  });
+
+  // Driver: arms follow steer like turning a wheel, head bobs with speed and leans into drifts.
+  const armAngle = steerVal * 0.6;
+  armPivotL.rotation.x = -armAngle * 0.5;
+  armPivotR.rotation.x = armAngle * 0.5;
+  armPivotL.rotation.z = armAngle * 0.3;
+  armPivotR.rotation.z = armAngle * 0.3;
+  driverHead.rotation.z = bodyRoll * 1.8 + (isDrifting ? -driftDirVal * 0.15 : 0);
+  driverHead.position.y = 0.5 + Math.sin(now / 140) * 0.01 * speedFrac;
+
+  // Boost flames: visible and flickering only while boosting.
+  flameL.visible = flameR.visible = isBoosting;
+  if (isBoosting) {
+    const flicker = 0.8 + Math.random() * 0.5;
+    flameL.scale.set(flicker, flicker * (0.9 + Math.random() * 0.3), flicker);
+    flameR.scale.set(flicker, flicker * (0.9 + Math.random() * 0.3), flicker);
+  }
 }
 
 // ===================================================================
@@ -623,6 +907,7 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (composer) composer.setSize(window.innerWidth, window.innerHeight);
   speedlinesCanvas.width = window.innerWidth;
   speedlinesCanvas.height = window.innerHeight;
 });
@@ -652,24 +937,29 @@ function makePool(count, geometry, material) {
       p.baseOpacity = opts.opacity === undefined ? 1 : opts.opacity;
       p.mesh.material.opacity = p.baseOpacity;
       if (opts.color) p.mesh.material.color.set(opts.color);
+      p.gravity = opts.gravity || 0;
+      p.spin = opts.spin || 0;
     },
     update(dt) {
       for (const p of items) {
         if (p.life <= 0) continue;
         p.life -= dt;
+        if (p.gravity) p.vel.y -= p.gravity * dt;
         p.mesh.position.addScaledVector(p.vel, dt);
+        if (p.spin) p.mesh.rotation.x += p.spin * dt;
         if (p.life <= 0) { p.mesh.visible = false; continue; }
         p.mesh.material.opacity = (p.life / p.maxLife) * p.baseOpacity;
       }
     },
   };
 }
-const dustPool = makePool(VFXCFG.dustMax, new THREE.SphereGeometry(0.15, 6, 6), new THREE.MeshBasicMaterial({ color: col(PALETTE.chalk) }));
-const skidPool = makePool(VFXCFG.skidMax, new THREE.PlaneGeometry(0.3, 0.6), layered(new THREE.MeshBasicMaterial({ color: col(PALETTE.ink), depthWrite: false }), 3));
+const qualityScale = QUALITY_LOW ? 0.5 : 1;
+const dustPool = makePool(Math.round(VFXCFG.dustMax * qualityScale), new THREE.SphereGeometry(0.15, 6, 6), new THREE.MeshBasicMaterial({ color: col(PALETTE.chalk) }));
+const skidPool = makePool(Math.round(VFXCFG.skidMax * qualityScale), new THREE.PlaneGeometry(0.3, 0.6), layered(new THREE.MeshBasicMaterial({ color: col(PALETTE.ink), depthWrite: false }), 3));
 const exhaustPool = makePool(40, new THREE.SphereGeometry(0.09, 6, 6), new THREE.MeshBasicMaterial({ color: col(PALETTE.ink) }));
 
 // Drift-tier sparks: color is set per-spawn (mini-turbo tier), geometry stays a small shard.
-const sparkPool = makePool(60, new THREE.BoxGeometry(0.06, 0.06, 0.12), new THREE.MeshBasicMaterial({ color: col(PALETTE.sun) }));
+const sparkPool = makePool(60, new THREE.BoxGeometry(0.06, 0.06, 0.12), new THREE.MeshBasicMaterial({ color: col(PALETTE.sun), toneMapped: false }));
 function spawnDriftSparks(hexColor) {
   const rearLocal = [new THREE.Vector3(-0.5, 0.32, -0.9), new THREE.Vector3(0.5, 0.32, -0.9)];
   rearLocal.forEach((local) => {
@@ -682,6 +972,20 @@ function spawnDriftSparks(hexColor) {
       });
     }
   });
+}
+
+// Finish-line confetti (plan v3 §4.3)
+const CONFETTI_COLORS = [PALETTE.coral, PALETTE.sun, PALETTE.mint, PALETTE.chalk, PALETTE.dusk];
+const confettiPool = makePool(120, new THREE.PlaneGeometry(0.12, 0.18), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+function spawnConfetti(originPos) {
+  for (let i = 0; i < 90; i++) {
+    confettiPool.spawn(originPos, {
+      life: 1.5 + Math.random() * 1.5, opacity: 1,
+      color: col(CONFETTI_COLORS[i % CONFETTI_COLORS.length]),
+      vel: new THREE.Vector3((Math.random() - 0.5) * 4, 4 + Math.random() * 3, (Math.random() - 0.5) * 4),
+      gravity: 6, spin: (Math.random() - 0.5) * 12,
+    });
+  }
 }
 
 // ===================================================================
@@ -828,7 +1132,21 @@ const hud = (() => {
   const elCache = {};
   const el = (id) => elCache[id] || (elCache[id] = document.getElementById(id));
   const textCache = {};
-  const set = (id, text) => { if (textCache[id] !== text) { textCache[id] = text; el(id).textContent = text; } };
+  // `pop` (plan v3 §4.4): a quick scale animation, only for numbers that change occasionally
+  // (lap, best lap) — never for ones that change every frame (timer, speed), or it'd spam.
+  const set = (id, text, pop) => {
+    if (textCache[id] === text) return;
+    const first = textCache[id] === undefined;
+    textCache[id] = text;
+    const node = el(id);
+    node.textContent = text;
+    if (pop && !first) {
+      node.classList.remove("pop");
+      void node.offsetWidth;
+      node.classList.add("pop");
+    }
+  };
+  let displayedSpeedFrac = 0, speedVelocity = 0, lastUpdateT = null;
   const fmt = (ms) => {
     if (!isFinite(ms)) return "--:--.---";
     const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60, x = Math.floor(ms % 1000);
@@ -850,16 +1168,26 @@ const hud = (() => {
     },
     update(now, speedVal, race) {
       const racing = race.state === "RACING";
-      set("hud-lap", String(Math.max(1, race.lap)));
+      set("hud-lap", String(Math.max(1, race.lap)), true);
       set("hud-laps", String(TRACK.laps));
       set("hud-time", racing ? fmt(now - race.t0) : fmt(0));
-      set("hud-best", fmt(race.best));
-      set("hud-speed", String(Math.round(Math.abs(speedVal) * HUDCFG.kmhPerUnit)));
+      set("hud-best", fmt(race.best), true);
+
+      // Speedometer overshoots slightly and settles instead of snapping (plan v3 §4.4):
+      // an underdamped mass-spring-damper on the displayed fraction, not a plain ease.
+      const dt = lastUpdateT === null ? 1 / 60 : Math.min(0.1, (now - lastUpdateT) / 1000);
+      lastUpdateT = now;
+      const targetFrac = Math.min(1, Math.abs(speedVal) / V.MAX_FWD);
+      const STIFFNESS = 100, DAMPING = 9;
+      const accel = (targetFrac - displayedSpeedFrac) * STIFFNESS - speedVelocity * DAMPING;
+      speedVelocity += accel * dt;
+      displayedSpeedFrac += speedVelocity * dt;
+
+      set("hud-speed", String(Math.round(Math.max(0, displayedSpeedFrac) * V.MAX_FWD * HUDCFG.kmhPerUnit)));
       const reverse = speedVal < -0.2;
       set("hud-gear", reverse ? "R" : "D");
       el("hud-gear").classList.toggle("reverse", reverse);
-      const frac = Math.min(1, Math.abs(speedVal) / V.MAX_FWD);
-      el("speedo-fill").style.strokeDasharray = `${(235.6 * frac).toFixed(1)} 314.2`;
+      el("speedo-fill").style.strokeDasharray = `${(235.6 * Math.max(0, displayedSpeedFrac)).toFixed(1)} 314.2`;
     },
     flashBestLap() { banner("MELHOR VOLTA!", "go"); },
     showResults(total, best) {
@@ -893,6 +1221,7 @@ const RACE = {
   sector: 0, countdownEnd: 0, finishedAt: 0, wrongWayTime: 0,
 };
 let controllerConnected = false;
+let finishOrbitStart = 0; // performance.now() timestamp; drives the 5s finish camera orbit
 let lastTrackIdxForWrongWay = 0;
 let wrongWayCooldown = 0;
 
@@ -903,7 +1232,11 @@ function startCountdown(now) {
   wrongWayCooldown = 0;
   Object.assign(RACE, { state: "COUNTDOWN", countdownEnd: now + HUDCFG.countdownMs });
   hud.countdown(HUDCFG.countdownMs);
-  [3, 2, 1].forEach((n, i) => setTimeout(() => gameAudio.countdownBeep(false), i * (HUDCFG.countdownMs / 3)));
+  setGantryLights(0, false);
+  [3, 2, 1].forEach((n, i) => setTimeout(() => {
+    gameAudio.countdownBeep(false);
+    setGantryLights(i + 1, false); // lights turn on one at a time
+  }, i * (HUDCFG.countdownMs / 3)));
   resultsEl.classList.remove("show");
   lobbyEl.classList.add("hidden");
   hudEl.hidden = false;
@@ -915,7 +1248,9 @@ function completeLap(now) {
   if (lapTime < RACE.best) { RACE.best = lapTime; hud.flashBestLap(); }
   if (RACE.lap >= TRACK.laps) {
     Object.assign(RACE, { state: "FINISHED", finishedAt: now });
+    finishOrbitStart = now;
     hud.showResults(now - RACE.t0, RACE.best);
+    spawnConfetti(new THREE.Vector3(pos.x, 1.2, pos.z));
     return;
   }
   RACE.lap++;
@@ -962,6 +1297,8 @@ function updateRace(now, gasPressedEdge) {
         Object.assign(RACE, { state: "RACING", lap: 1, t0: now, lapStart: now, sector: 0 });
         hud.banner("JÁ!", "go");
         gameAudio.countdownBeep(true);
+        setGantryLights(3, true);
+        setTimeout(() => setGantryLights(0, false), 600); // lights out shortly after go
       }
       break;
     case "RACING":
@@ -1147,9 +1484,9 @@ function animate() {
       const threshold = HALF_ROAD + TRACK.curbWidth + WORLD.wallDist;
       pos.x = samples[q.i].x + (dx / d) * threshold;
       pos.z = samples[q.i].z + (dz / d) * threshold;
-      speed *= 0.4;
+      speed *= 0.55; // eased from 0.4 — hitting a wall shouldn't cost almost all your speed
       shakeMag = Math.max(shakeMag, 0.25);
-      if (!prevWallHit) gameAudio.wallThump();
+      if (!prevWallHit) { gameAudio.wallThump(); triggerWallWobble(); }
     } else if (q.dist > HALF_ROAD) {
       offroad = true;
       if (speed > V.MAX_FWD * WORLD.offroadSpeedMul) speed = V.MAX_FWD * WORLD.offroadSpeedMul;
@@ -1174,7 +1511,7 @@ function animate() {
   kartRoot.position.copy(pos);
   kartRoot.rotation.y = visualHeading;
   kartRoot.updateMatrixWorld(); // exhaust spawn below needs this frame's transform, not last frame's
-  animateBody(dt, steer, speed);
+  animateBody(dt, steer, speed, drifting, boosting, offroad, driftDir);
   frontWheels.forEach((w) => (w.rotation.y = steer * 0.5));
   wheels.forEach((w) => (w.rotation.x -= speed * dt * 3));
 
@@ -1210,47 +1547,74 @@ function animate() {
   skidPool.update(dt);
   exhaustPool.update(dt);
   sparkPool.update(dt);
+  confettiPool.update(dt);
 
-  // --- chase camera: pullback, position/look lag (look-ahead, not at the kart), rumble, roll, FOV spring ---
-  const pullbackTarget = CAMCFG.pullback * speedFrac;
-  pullbackCurrent += (pullbackTarget - pullbackCurrent) * (1 - Math.exp(-CAMCFG.pullbackSpring * dt));
-  const effectiveDist = FOLLOW_DIST + pullbackCurrent;
+  // --- finish camera: 5s orbit around the kart (plan v3 §4.3) ---
+  const finishOrbitElapsed = now - finishOrbitStart;
+  if (RACE.state === "FINISHED" && finishOrbitElapsed < 5000) {
+    const orbitAngle = (finishOrbitElapsed / 5000) * Math.PI * 2;
+    const orbitRadius = 8;
+    camPos.set(pos.x + Math.sin(orbitAngle) * orbitRadius, pos.y + 4, pos.z + Math.cos(orbitAngle) * orbitRadius);
+    lookPos.set(pos.x, pos.y + 0.8, pos.z);
+    camera.position.copy(camPos);
+    camera.rotation.z = 0; // clear any leftover bank from the last racing frame
+    camera.lookAt(lookPos);
+    fovCurrent += (CAMCFG.restFov - fovCurrent) * (1 - Math.exp(-CAMCFG.fovSpring * dt));
+    camera.fov = fovCurrent; // keep in sync with the chase-cam branch, or FOV snaps when the orbit ends
+    camera.updateProjectionMatrix();
+  } else {
+    // --- chase camera: pullback, position/look lag (look-ahead, not at the kart), rumble, roll, FOV spring ---
+    const pullbackTarget = CAMCFG.pullback * speedFrac;
+    pullbackCurrent += (pullbackTarget - pullbackCurrent) * (1 - Math.exp(-CAMCFG.pullbackSpring * dt));
+    const effectiveDist = FOLLOW_DIST + pullbackCurrent;
 
-  const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
-  const idealCam = new THREE.Vector3(pos.x - forward.x * effectiveDist, pos.y + FOLLOW_HEIGHT, pos.z - forward.z * effectiveDist);
-  const idealLook = new THREE.Vector3(pos.x + forward.x * CAMCFG.lookAhead, pos.y + LOOK_HEIGHT, pos.z + forward.z * CAMCFG.lookAhead);
-  camPos.lerp(idealCam, 1 - Math.exp(-3.0 * dt));
-  lookPos.lerp(idealLook, 1 - Math.exp(-9.0 * dt));
+    const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
+    const idealCam = new THREE.Vector3(pos.x - forward.x * effectiveDist, pos.y + FOLLOW_HEIGHT, pos.z - forward.z * effectiveDist);
+    const idealLook = new THREE.Vector3(pos.x + forward.x * CAMCFG.lookAhead, pos.y + LOOK_HEIGHT, pos.z + forward.z * CAMCFG.lookAhead);
+    camPos.lerp(idealCam, 1 - Math.exp(-3.0 * dt));
+    lookPos.lerp(idealLook, 1 - Math.exp(-9.0 * dt));
 
-  shakeMag *= Math.pow(0.002, dt);
-  const rumble = speedFrac > CAMCFG.rumbleMaxSpeedFrac
-    ? CAMCFG.rumbleMax * (speedFrac - CAMCFG.rumbleMaxSpeedFrac) / (1 - CAMCFG.rumbleMaxSpeedFrac)
-    : 0;
-  const totalShake = shakeMag + rumble;
-  const shakeOffset = totalShake > 0.001
-    ? new THREE.Vector3((Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake)
-    : new THREE.Vector3();
+    shakeMag *= Math.pow(0.002, dt);
+    const rumble = speedFrac > CAMCFG.rumbleMaxSpeedFrac
+      ? CAMCFG.rumbleMax * (speedFrac - CAMCFG.rumbleMaxSpeedFrac) / (1 - CAMCFG.rumbleMaxSpeedFrac)
+      : 0;
+    const totalShake = shakeMag + rumble;
+    const shakeOffset = totalShake > 0.001
+      ? new THREE.Vector3((Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake)
+      : new THREE.Vector3();
 
-  camera.position.copy(camPos).add(shakeOffset);
-  camera.lookAt(lookPos);
+    camera.position.copy(camPos).add(shakeOffset);
+    camera.lookAt(lookPos);
 
-  const rollTarget = -steer * speedFrac * THREE.MathUtils.degToRad(CAMCFG.rollMaxDeg);
-  cameraRoll += (rollTarget - cameraRoll) * (1 - Math.exp(-8 * dt));
-  camera.rotateZ(cameraRoll); // banking, applied after lookAt so it doesn't fight the look target
+    const rollTarget = -steer * speedFrac * THREE.MathUtils.degToRad(CAMCFG.rollMaxDeg);
+    cameraRoll += (rollTarget - cameraRoll) * (1 - Math.exp(-8 * dt));
+    camera.rotateZ(cameraRoll); // banking, applied after lookAt so it doesn't fight the look target
 
-  const fovTarget = boosting ? CAMCFG.boostFov : CAMCFG.restFov + (CAMCFG.topFov - CAMCFG.restFov) * speedFrac;
-  fovCurrent += (fovTarget - fovCurrent) * (1 - Math.exp(-CAMCFG.fovSpring * dt));
-  camera.fov = fovCurrent;
-  camera.updateProjectionMatrix();
+    const fovTarget = boosting ? CAMCFG.boostFov : CAMCFG.restFov + (CAMCFG.topFov - CAMCFG.restFov) * speedFrac;
+    fovCurrent += (fovTarget - fovCurrent) * (1 - Math.exp(-CAMCFG.fovSpring * dt));
+    camera.fov = fovCurrent;
+    camera.updateProjectionMatrix();
+  }
 
   followShadow(kartRoot.position);
 
+  updateTreeSway(now);
+  updateGantryFlags(now);
+  updateBoostPads(dt);
+  updateClouds(dt);
   drawSpeedLines(speedFrac, boosting);
   drawMinimap();
   hud.update(now, speed, RACE);
   hud.setDrift(drifting, driftCharge, DRIFTCFG.tiers);
   document.getElementById("speed").textContent = `${Math.round(speedFrac * 100)}%${speed < 0 ? " R" : ""}`;
 
-  renderer.render(scene, camera);
+  if (composer) {
+    // Radial blur: 0 below 70% speed, up to 0.6 at top speed, 1.0 while boosting.
+    const blurStrength = boosting ? 1.0 : speedFrac > 0.7 ? ((speedFrac - 0.7) / 0.3) * 0.6 : 0;
+    radialBlurPass.uniforms.strength.value = blurStrength;
+    composer.render();
+  } else {
+    renderer.render(scene, camera);
+  }
 }
 animate();

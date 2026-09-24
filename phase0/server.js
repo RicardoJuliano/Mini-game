@@ -12,6 +12,8 @@ const MIME = {
   ".js": "text/javascript",
   ".css": "text/css",
   ".json": "application/json",
+  ".glb": "model/gltf-binary",
+  ".woff2": "font/woff2",
 };
 
 // iOS Safari only hands out DeviceMotion/DeviceOrientation data on a secure

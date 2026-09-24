@@ -23,15 +23,15 @@
       [-20, 55], [-50, 60],
       [-75, 40], [-80, 0], [-70, -40],
     ],
-    roadWidth: 8.5, // ~4 kart widths; was 12 (drivable flat-out, no line discipline needed)
+    roadWidth: 10.5, // eased back up from 8.5 — that was too punishing for a first playtest
     curbWidth: 1.2,
     samples: 500,   // longer track than before, keep sample spacing similar
     laps: 3,
   };
 
   const WORLD = {
-    wallDist: 2.5,          // was 5 — less room to cut corners (plan v3 §5.2)
-    offroadSpeedMul: 0.35,  // was 0.5 (plan v3 §5.2)
+    wallDist: 4,            // eased back up from 2.5 — walls were too close to the road edge
+    offroadSpeedMul: 0.5,   // eased back up from 0.35 — off-road was cutting speed too hard
     treeCount: 90,
     barrierSpacing: 6,      // world units between tire-barrier stacks on outer corners
     treeRadiusMin: 14,      // trees fill the infield too, not just the outer ring
@@ -53,14 +53,14 @@
 
   // Chase camera feel (plan v3 §2.2)
   const CAMERA = {
-    followHeight: 2.2,       // was 3.0 — lower reads as faster
-    followDist: 5.6,         // was 6.2
-    lookAhead: 4,            // look at a point this far ahead of the kart, not the kart itself
+    followHeight: 1.3,       // brought in closer again (was 1.7)
+    followDist: 3.0,         // brought in closer again (was 4.0)
+    lookAhead: 2.0,          // look at a point this far ahead of the kart, not the kart itself (was 2.5)
     restFov: 68,
     topFov: 88,
     boostFov: 98,
     fovSpring: 4,            // spring rate for FOV changes (was an instant per-frame lerp)
-    pullback: 1.2,           // extra follow distance at top speed
+    pullback: 0.4,           // extra follow distance at top speed — was 1.0, which read as "camera drifts away when accelerating"
     pullbackSpring: 3.5,
     rumbleMaxSpeedFrac: 0.6, // rumble starts above this fraction of top speed
     rumbleMax: 0.04,

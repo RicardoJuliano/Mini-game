@@ -48,6 +48,9 @@
   .hud-big   { font-size: clamp(32px, 6vh, 72px); line-height: 1; font-variant-numeric: tabular-nums; }
   .hud-label { font-size: clamp(14px, 2vh, 22px); letter-spacing: 0.08em; opacity: 0.85; }
   .hud-best  { color: #ffd23f; }
+  .pop { display: inline-block; animation: numberPop 280ms ease-out; }
+  @keyframes numberPop { 0% { transform: scale(1.5); } 100% { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { .pop { animation-duration: 1ms; } }
 
   .hud-lap, .hud-timer, .hud-speedo, .hud-conn, .hud-minimap {
     position: absolute; background: rgba(36, 25, 52, 0.72); border-radius: 16px; padding: 1.2vh 1.4vw;
@@ -86,16 +89,19 @@
   }
   @media (prefers-reduced-motion: reduce) { .hud-banner.show { animation-duration: 1ms; opacity: 1; } }
 
-  /* --- results card --- */
-  #results { position: fixed; inset: 0; z-index: 22; display: none; align-items: center; justify-content: center;
-             background: rgba(10,7,15,0.72); }
-  #results.show { display: flex; }
+  /* --- results card: slides up + fades in (transform/opacity only) --- */
+  #results { position: fixed; inset: 0; z-index: 22; display: flex; align-items: center; justify-content: center;
+             background: rgba(10,7,15,0.72); opacity: 0; pointer-events: none; transition: opacity 0.25s ease-out; }
+  #results.show { opacity: 1; pointer-events: auto; }
   #results-card { background: #241934; border: 2px solid #4a3866; border-radius: 20px; padding: 40px 56px;
-                  text-align: center; font-family: 'TiltDisplay', system-ui, sans-serif; }
+                  text-align: center; font-family: 'TiltDisplay', system-ui, sans-serif;
+                  transform: translateY(40px); opacity: 0; transition: transform 0.4s ease-out, opacity 0.4s ease-out; }
+  #results.show #results-card { transform: translateY(0); opacity: 1; }
   #results-card h2 { font-size: clamp(40px, 8vh, 80px); color: #ffd23f; margin: 0 0 18px; }
   #results-card .row { font-size: 20px; color: #fff4e6; margin: 6px 0; font-variant-numeric: tabular-nums; }
   #results-card .row b { color: #2fe6a0; }
   #results-card .hint { margin-top: 18px; font-size: 15px; color: #b7a9cc; font-family: system-ui, sans-serif; }
+  @media (prefers-reduced-motion: reduce) { #results, #results-card { transition-duration: 1ms; } }
 
   /* --- audio unlock badge: browsers require a real gesture on THIS page --- */
   #audio-prompt {
@@ -190,6 +196,14 @@
   <div id="overlay">Player disconnected</div>
 
   <script src="shared/three.min.js"></script>
+  <script src="shared/postprocessing/Pass.js"></script>
+  <script src="shared/postprocessing/EffectComposer.js"></script>
+  <script src="shared/postprocessing/RenderPass.js"></script>
+  <script src="shared/postprocessing/ShaderPass.js"></script>
+  <script src="shared/postprocessing/CopyShader.js"></script>
+  <script src="shared/postprocessing/LuminosityHighPassShader.js"></script>
+  <script src="shared/postprocessing/UnrealBloomPass.js"></script>
+  <script src="shared/loaders/GLTFLoader.js"></script>
   <script src="shared/qrcode.min.js"></script>
   <script src="shared/protocol.js"></script>
   <script src="shared/visual-config.js"></script>
