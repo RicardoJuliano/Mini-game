@@ -21,6 +21,8 @@
     REVERSE_DELAY: 0.2, // seconds holding brake at standstill before reverse kicks in
     TURN_RATE: 2.6,     // rad/sec at REF_SPEED — a touch higher so corners stay possible at the new speed
     REF_SPEED: 9,       // speed at which steering reaches full TURN_RATE
+    LAT_GRIP: 30,       // max lateral accel (units/s^2); caps yaw rate so tight corners need braking (B5)
+    DRIFT_GRIP_MUL: 1.3, // drifting raises the grip limit, so a good drift beats braking through a corner
   };
 
   const BUTTONS = { GAS: 1 << 0, BRAKE: 1 << 1, DRIFT: 1 << 2, ITEM: 1 << 3, PAUSE: 1 << 4 };

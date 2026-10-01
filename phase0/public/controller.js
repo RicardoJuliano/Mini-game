@@ -43,11 +43,17 @@ function recenter() {
 document.getElementById("center-btn").addEventListener("click", recenter);
 
 // --- orientation: landscape only, steer forced to 0 in portrait ---
+// iOS Safari fires `resize` when its toolbar shows/hides (no real rotation), and a
+// naive recenter() there yanks the steering center to whatever tilt the player
+// happens to be holding at that instant — the car starts pulling to one side mid-race.
+// Only recenter when the screen's actual orientation angle changed.
+let lastScreenAngle = P.screenAngle();
 function updateOrientationState() {
   isPortrait = window.innerHeight > window.innerWidth;
   rotateOverlay.style.display = isPortrait ? "flex" : "none";
-  if (isPortrait) steer = 0;
-  else recenter();
+  if (isPortrait) { steer = 0; return; }
+  const angle = P.screenAngle();
+  if (angle !== lastScreenAngle) { lastScreenAngle = angle; center = 0; }
 }
 window.addEventListener("resize", updateOrientationState);
 if (screen.orientation) screen.orientation.addEventListener("change", updateOrientationState);

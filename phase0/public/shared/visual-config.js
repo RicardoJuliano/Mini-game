@@ -14,14 +14,17 @@
   // Technical layout (plan v3 §5.1): a long straight, a fast sweeper, a chicane,
   // an S-section and a hairpin — the old loop could be driven flat-out with no braking.
   const TRACK = {
+    // Re-tuned from the original layout (B4): the chicane at (55,15) had a 5.5-radius
+    // corner against a 6.45 inner-curb offset, folding the ribbon geometry over itself
+    // (confirmed z-fighting flicker there). Every corner here is >=10.3 radius.
     points: [
-      [-60, -60], [20, -62], [70, -55],
-      [90, -35], [85, -10],
-      [60, 0], [55, 15],
-      [75, 30], [80, 55], [60, 70],
-      [35, 62], [30, 40], [10, 35],
-      [-20, 55], [-50, 60],
-      [-75, 40], [-80, 0], [-70, -40],
+      [-59, -60], [20, -62], [70, -55],
+      [90, -35], [84, -19],
+      [57, -2], [54, 11],
+      [70, 33], [80, 55], [61, 76],
+      [40, 68], [30, 40], [8, 32],
+      [-21, 55], [-51, 63],
+      [-75, 40], [-78, 0], [-70, -40],
     ],
     roadWidth: 10.5, // eased back up from 8.5 — that was too punishing for a first playtest
     curbWidth: 1.2,
@@ -51,16 +54,21 @@
     skidLifeSec: 4,
   };
 
-  // Chase camera feel (plan v3 §2.2)
+  // Chase camera feel (plan v3 §2.2, re-tuned for the B3 kart-relative rig — see host.js).
+  // The old lerp-follow rig lagged by speed/rate (~8.7 units at top speed under the old
+  // rate of 3), which is what actually read as "camera far away when accelerating" —
+  // not the base distances themselves. The rig no longer lags position, only yaw, so
+  // these numbers are the camera's real, full-time distance from the kart.
   const CAMERA = {
-    followHeight: 1.3,       // brought in closer again (was 1.7)
-    followDist: 3.0,         // brought in closer again (was 4.0)
-    lookAhead: 2.0,          // look at a point this far ahead of the kart, not the kart itself (was 2.5)
-    restFov: 68,
-    topFov: 88,
-    boostFov: 98,
+    followHeight: 1.8,
+    followDist: 4.2,
+    lookAhead: 4.0,          // look at a point this far ahead of the kart, not the kart itself
+    yawSpring: 5,            // only the camera's yaw lags now, not its position
+    restFov: 65,
+    topFov: 82,
+    boostFov: 92,
     fovSpring: 4,            // spring rate for FOV changes (was an instant per-frame lerp)
-    pullback: 0.4,           // extra follow distance at top speed — was 1.0, which read as "camera drifts away when accelerating"
+    pullback: 1.0,           // extra follow distance at top speed (intentional, on top of followDist)
     pullbackSpring: 3.5,
     rumbleMaxSpeedFrac: 0.6, // rumble starts above this fraction of top speed
     rumbleMax: 0.04,

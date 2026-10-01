@@ -3,6 +3,17 @@
 // ===================================================================
 const DEBUG = new URLSearchParams(location.search).has("debug");
 const QUALITY_LOW = new URLSearchParams(location.search).get("quality") === "low"; // disables post FX, shadows, halves particle pools
+
+// Dev-only input sources (D1): let the agent actually see and test the game without
+// a phone. None of these touch the websocket/controller input path.
+const KEYS_MODE = new URLSearchParams(location.search).has("keys");
+const AUTOPILOT_MODE = new URLSearchParams(location.search).has("autopilot");
+const SKIP_LOBBY = new URLSearchParams(location.search).has("skipLobby");
+const devKeyState = {};
+if (KEYS_MODE) {
+  window.addEventListener("keydown", (e) => { devKeyState[e.key] = true; });
+  window.addEventListener("keyup", (e) => { devKeyState[e.key] = false; });
+}
 const panelEl = document.getElementById("panel");
 if (DEBUG) panelEl.style.display = "block";
 
@@ -91,7 +102,11 @@ const RadialBlurShader = {
         float t = float(i) / 7.0;
         c += texture2D(tDiffuse, vUv - dir * strength * t * 0.08);
       }
-      gl_FragColor = c / 8.0;
+      // The composer's render targets are linear; without this conversion the final
+      // pass skips the linear->sRGB step the default (non-composer) render path does
+      // for free, and the image comes out badly wrong (verified via screenshot: not
+      // just "off" but a severely blown-out, overexposed scene vs. ?quality=low).
+      gl_FragColor = linearToOutputTexel(c / 8.0);
     }`,
 };
 
@@ -99,11 +114,9 @@ let composer = null, radialBlurPass = null;
 if (!QUALITY_LOW) {
   composer = new THREE.EffectComposer(renderer);
   composer.addPass(new THREE.RenderPass(scene, camera));
-  // Threshold is tuned lower than the plan's suggested 0.85: our brake lights are a pure
-  // red emissive, and standard luminance weighting (0.299/0.587/0.114) puts pure red at
-  // ~0.3, never crossing a high threshold. Bloom-source materials are also marked
-  // toneMapped=false below so they read as reliably "bright" regardless of exposure.
-  const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.4, 0.55);
+  // threshold 0.55/strength 0.7 bloomed almost the entire grass/sky, confirmed by
+  // screenshot comparison against ?quality=low — raised threshold, cut strength.
+  const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.35, 0.4, 0.88);
   composer.addPass(bloomPass);
   radialBlurPass = new THREE.ShaderPass(RadialBlurShader);
   radialBlurPass.renderToScreen = true;
@@ -272,10 +285,14 @@ function stripeTexture(colorA, colorB) {
   ctx.fillStyle = colorA; ctx.fillRect(0, 0, 4, 8);
   ctx.fillStyle = colorB; ctx.fillRect(0, 8, 4, 8);
   const tex = finishTexture(new THREE.CanvasTexture(c));
-  tex.repeat.set(1, 40);
+  // The ribbon's UV already gives one texture period every 2 units (v = distance/2);
+  // repeat(1,40) on top of that made each stripe 0.05 units long (B6) — mipmaps
+  // averaged it into a flat smear instead of visible stripes.
+  tex.repeat.set(1, 1);
   return tex;
 }
-const curbMaterial = layered(new THREE.MeshBasicMaterial({ map: stripeTexture(PALETTE.coral, PALETTE.chalk) }), 2);
+// Toon (not Basic) so curbs receive light/shadow like the road instead of flat-lit.
+const curbMaterial = layered(new THREE.MeshToonMaterial({ map: stripeTexture(PALETTE.coral, PALETTE.chalk), gradientMap: GRADIENT }), 2);
 
 // Road sits just above grass (both would otherwise share y=0 and z-fight — cause 1.2),
 // curbs above the road, start line above curbs; each level also gets a polygon offset.
@@ -305,22 +322,25 @@ let startPlane;
   scene.add(startPlane);
 }
 
-// Tire barriers: instanced stacked cylinders on the outer edge of sharp corners
+// B8: every trackside prop is now anchored to the actual physical wall distance, so
+// none of them float inside it (kart would drive through) or sit oddly far outside it.
+const WALL_R = HALF_ROAD + TRACK.curbWidth + WORLD.wallDist;
+
+// Tire barriers: continuous stacked-cylinder wall along both edges, not just corners —
+// previously only sharp turns got barriers, so straights had no visible boundary at all.
 {
   const barrierGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.5, 12);
+  const barrierR = WALL_R + 0.55;
   const barrierPositions = [];
-  for (let i = 0; i < TRACK.samples; i += WORLD.barrierSpacing) {
-    const a = tangents[(i + 6) % TRACK.samples], b = tangents[(i - 6 + TRACK.samples) % TRACK.samples];
-    const turn = a.x * b.z - a.z * b.x; // curvature sign/magnitude proxy
-    if (Math.abs(turn) < 0.12) continue; // only place on noticeably curved sections
+  for (let i = 0; i < TRACK.samples; i += 1) {
     const p = samples[i], t = tangents[i];
     const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
-    const side = turn > 0 ? 1 : -1;
-    const bx = p.x + n.x * side * (HALF_ROAD + TRACK.curbWidth + 1.2);
-    const bz = p.z + n.z * side * (HALF_ROAD + TRACK.curbWidth + 1.2);
-    barrierPositions.push([bx, 0.25, bz], [bx, 0.72, bz]);
+    [1, -1].forEach((side) => {
+      const bx = p.x + n.x * side * barrierR, bz = p.z + n.z * side * barrierR;
+      barrierPositions.push([bx, 0.25, bz], [bx, 0.72, bz]);
+    });
   }
-  const barrierMesh = new THREE.InstancedMesh(barrierGeo, toon(PALETTE.coral), barrierPositions.length || 1);
+  const barrierMesh = new THREE.InstancedMesh(barrierGeo, toon(PALETTE.coral), barrierPositions.length);
   barrierMesh.castShadow = true;
   barrierMesh.receiveShadow = true;
   const dummy = new THREE.Object3D();
@@ -411,7 +431,7 @@ const sampleSpacing = trackLength / TRACK.samples;
   for (let i = 0; i < TRACK.samples; i += stride) {
     const p = samples[i], t = tangents[i];
     const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
-    const off = HALF_ROAD + TRACK.curbWidth + FLOW.fencePostOffset;
+    const off = WALL_R + FLOW.fencePostOffset;
     [1, -1].forEach((side) => {
       dummy.position.set(p.x + n.x * off * side, 0.55, p.z + n.z * off * side);
       dummy.updateMatrix();
@@ -433,7 +453,7 @@ const sampleSpacing = trackLength / TRACK.samples;
   positions.forEach((i, k) => {
     const p = samples[i], t = tangents[i];
     const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
-    const off = HALF_ROAD + TRACK.curbWidth + FLOW.fencePostOffset + 0.6;
+    const off = WALL_R + FLOW.fencePostOffset + 0.6;
     dummy.position.set(p.x + n.x * off, 0.7, p.z + n.z * off);
     dummy.updateMatrix();
     markerMesh.setMatrixAt(k, dummy.matrix);
@@ -447,14 +467,14 @@ const gantryLights = [];
 const gantryFlags = [];
 {
   const postGeo = new THREE.BoxGeometry(0.5, 4.5, 0.5);
-  const beamGeo = new THREE.BoxGeometry(TRACK.roadWidth + TRACK.curbWidth * 2 + 1, 0.6, 0.5);
+  const beamGeo = new THREE.BoxGeometry((WALL_R + 0.3) * 2 + 0.5, 0.6, 0.5); // span the posts, now moved out to WALL_R
   const gantry = new THREE.Group();
   const postMat = toon(PALETTE.ink), beamMat = toon(PALETTE.coral);
   const leftPost = new THREE.Mesh(postGeo, postMat);
   const rightPost = new THREE.Mesh(postGeo, postMat);
   const beam = new THREE.Mesh(beamGeo, beamMat);
-  leftPost.position.set(-(HALF_ROAD + TRACK.curbWidth + 0.5), 2.25, 0);
-  rightPost.position.set(HALF_ROAD + TRACK.curbWidth + 0.5, 2.25, 0);
+  leftPost.position.set(-(WALL_R + 0.3), 2.25, 0);
+  rightPost.position.set(WALL_R + 0.3, 2.25, 0);
   beam.position.set(0, 4.4, 0);
   [leftPost, rightPost, beam].forEach((m) => { m.castShadow = true; gantry.add(m); });
 
@@ -467,7 +487,7 @@ const gantryFlags = [];
   });
 
   const flagGeo = new THREE.PlaneGeometry(0.5, 0.35, 4, 1);
-  [-(HALF_ROAD + TRACK.curbWidth + 0.5), HALF_ROAD + TRACK.curbWidth + 0.5].forEach((fx) => {
+  [-(WALL_R + 0.3), WALL_R + 0.3].forEach((fx) => {
     const pivot = new THREE.Group();
     pivot.position.set(fx, 4.3, 0);
     const flag = new THREE.Mesh(flagGeo, new THREE.MeshBasicMaterial({ color: col(PALETTE.chalk), side: THREE.DoubleSide }));
@@ -570,7 +590,7 @@ loadGLB("flagCheckers.glb").then((base) => {
     const flag = base.clone(true);
     recolorKenneyModel(flag);
     flag.scale.setScalar(2.2);
-    flag.position.copy(p).addScaledVector(n, HALF_ROAD + TRACK.curbWidth + 1.4);
+    flag.position.copy(p).addScaledVector(n, WALL_R + 0.6);
     flag.rotation.y = Math.atan2(t.x, t.z);
     scene.add(flag);
   });
@@ -628,9 +648,12 @@ const kartRoot = new THREE.Group();
 scene.add(kartRoot);
 
 const blobShadowGeo = new THREE.CircleGeometry(1.1, 20);
-const blobShadow = new THREE.Mesh(blobShadowGeo, new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }));
+const blobShadow = new THREE.Mesh(blobShadowGeo, layered(new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }), 4));
 blobShadow.rotation.x = -Math.PI / 2;
-blobShadow.position.y = 0.035; // just above the road layer (0.03), or it renders occluded under it
+// Above curbs (0.05)/start line (0.06), or it fails the depth test intermittently over
+// them and flickers; depthWrite is already off, so no polygon-offset level is "wasted".
+blobShadow.position.y = 0.07;
+blobShadow.renderOrder = 2;
 kartRoot.add(blobShadow);
 
 const frontWheelGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.24, 16);
@@ -856,6 +879,19 @@ function resetKartToStart() {
 }
 resetKartToStart();
 
+// Autopilot (D1): follows the center line with a simple look-ahead pursuit. Good enough
+// to generate varied test frames (accel, braking, cornering) — not meant to be fast.
+function autopilotUpdate() {
+  const lookIdx = (trackIdx + 10) % TRACK.samples;
+  const target = samples[lookIdx];
+  const desiredHeading = Math.atan2(target.x - pos.x, target.z - pos.z);
+  const diff = angleDelta(heading, desiredHeading);
+  const steerOut = THREE.MathUtils.clamp(diff * 2, -1, 1);
+  const sharpness = Math.abs(diff);
+  const speedFracNow = Math.abs(speed) / V.MAX_FWD;
+  return { steer: steerOut, gas: sharpness < 0.5, brake: sharpness >= 0.5 && speedFracNow > 0.3 };
+}
+
 // ===================================================================
 // Chase camera: separately damped position (lags in turns) and look target,
 // plus speed pullback, FOV spring, rumble and turn roll (plan v3 §2.2)
@@ -869,6 +905,10 @@ let shakeMag = 0;
 let fovCurrent = CAMCFG.restFov;
 let pullbackCurrent = 0;
 let cameraRoll = 0;
+let camYaw = heading; // only this lags — camera distance is fixed, never grows with speed (B3)
+// Reused every frame instead of `new THREE.Vector3()`-per-frame (B10-adjacent: cheap, avoids GC churn).
+const camForwardTmp = new THREE.Vector3();
+const camShakeTmp = new THREE.Vector3();
 
 // ===================================================================
 // Speed-line vignette (own canvas, drawn every frame independent of three.js)
@@ -1215,18 +1255,24 @@ const hud = (() => {
 // ===================================================================
 // Race state machine (step 5)
 // ===================================================================
-const SECTORS = 4;
 const RACE = {
   state: "LOBBY", lap: 0, t0: 0, lapStart: 0, best: Infinity, lastLap: 0,
-  sector: 0, countdownEnd: 0, finishedAt: 0, wrongWayTime: 0,
+  countdownEnd: 0, finishedAt: 0, wrongWayTime: 0,
 };
 let controllerConnected = false;
 let finishOrbitStart = 0; // performance.now() timestamp; drives the 5s finish camera orbit
 let lastTrackIdxForWrongWay = 0;
 let wrongWayCooldown = 0;
 
+// Unwrapped track progress (B1 fix): driving backward over the line and then forward
+// again nets zero, so laps can no longer be farmed by reversing across the start.
+let lapProgress = 0;
+let lapLastIdx = 0;
+function resetLapProgress() { lapProgress = 0; lapLastIdx = trackIdx; }
+
 function startCountdown(now) {
   resetKartToStart();
+  camYaw = heading;
   lastTrackIdxForWrongWay = 0;
   RACE.wrongWayTime = 0;
   wrongWayCooldown = 0;
@@ -1260,13 +1306,13 @@ function completeLap(now) {
 
 function updateLaps(now) {
   const q = trackQuery(pos);
-  const sector = Math.floor(q.i / (TRACK.samples / SECTORS));
-  if (sector === (RACE.sector + 1) % SECTORS) {
-    if (sector === 0) completeLap(now);
-    RACE.sector = sector;
-  } else if (sector !== RACE.sector) {
-    RACE.sector = sector; // moving backward through a sector: track position, do not score
-  }
+  let d = q.i - lapLastIdx;
+  if (d > TRACK.samples / 2) d -= TRACK.samples;
+  if (d < -TRACK.samples / 2) d += TRACK.samples;
+  lapLastIdx = q.i;
+  lapProgress += d;
+  const lapsDone = Math.floor(lapProgress / TRACK.samples);
+  if (lapsDone >= RACE.lap) completeLap(now);
 }
 
 function checkWrongWay(dt, q) {
@@ -1294,7 +1340,8 @@ function updateRace(now, gasPressedEdge) {
       break;
     case "COUNTDOWN":
       if (now >= RACE.countdownEnd) {
-        Object.assign(RACE, { state: "RACING", lap: 1, t0: now, lapStart: now, sector: 0 });
+        Object.assign(RACE, { state: "RACING", lap: 1, t0: now, lapStart: now });
+        resetLapProgress();
         hud.banner("JÁ!", "go");
         gameAudio.countdownBeep(true);
         setGantryLights(3, true);
@@ -1358,13 +1405,17 @@ ws.addEventListener("message", (ev) => {
     document.getElementById("conn").textContent = "controller left";
     hud.setConn(false, 0);
   } else if (msg.type === "input") {
+    // B11: never trust a packet's shape, even though it comes from our own controller
+    // page — a modified/malicious client could send anything over this socket.
+    const s = Number(msg.steer), b = Number(msg.buttons);
+    if (!Number.isFinite(s) || !Number.isInteger(b)) return;
     const now = performance.now();
     lastPacketAt = now;
     packetCount++;
     document.getElementById("pkts").textContent = packetCount;
-    targetSteer = msg.steer / 32767;
-    rawGas = !!(msg.buttons & TiltProtocol.BUTTONS.GAS);
-    brake = !!(msg.buttons & TiltProtocol.BUTTONS.BRAKE);
+    targetSteer = Math.max(-1, Math.min(1, s / 32767));
+    rawGas = !!(b & TiltProtocol.BUTTONS.GAS);
+    brake = !!(b & TiltProtocol.BUTTONS.BRAKE);
     // Clocks aren't synced across devices, so this one-way estimate is noisier than
     // the ping/pong RTT above; kept because it's what the Phase 0 p95 target is phrased against.
     const oneWay = Date.now() - msg.t;
@@ -1385,6 +1436,19 @@ function animate() {
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
+
+  if (AUTOPILOT_MODE) {
+    const ap = autopilotUpdate();
+    targetSteer = ap.steer; rawGas = ap.gas; brake = ap.brake;
+    lastPacketAt = now;
+  } else if (KEYS_MODE) {
+    const right = devKeyState.ArrowRight || devKeyState.d ? 1 : 0;
+    const left = devKeyState.ArrowLeft || devKeyState.a ? 1 : 0;
+    targetSteer = right - left;
+    rawGas = !!(devKeyState.ArrowUp || devKeyState.w || devKeyState[" "]);
+    brake = !!(devKeyState.ArrowDown || devKeyState.s || devKeyState[" "]);
+    lastPacketAt = now;
+  }
 
   const sinceLast = now - lastPacketAt;
   const inputLive = lastPacketAt > 0 && sinceLast <= NEUTRAL_MS;
@@ -1454,9 +1518,14 @@ function animate() {
     const effectiveMaxFwd = boosting ? V.MAX_FWD * boostSpeedMul : V.MAX_FWD;
     speed = Math.max(-V.MAX_REV, Math.min(effectiveMaxFwd, speed));
 
+    // Grip limit (B5): without this, yaw rate above REF_SPEED is constant regardless
+    // of actual speed, so every corner (even the hairpin) could be taken flat-out.
     const turnRateMul = drifting ? DRIFTCFG.turnRateBonus : 1;
     const speedFactor = Math.max(-1, Math.min(1, speed / V.REF_SPEED));
-    heading += steer * V.TURN_RATE * turnRateMul * speedFactor * dt;
+    const grip = V.LAT_GRIP * (drifting ? V.DRIFT_GRIP_MUL : 1);
+    const gripYawLimit = grip / Math.max(Math.abs(speed), 1); // a = v^2/r  =>  yaw = a/v
+    const yawRate = Math.min(V.TURN_RATE * turnRateMul, gripYawLimit);
+    heading += steer * yawRate * speedFactor * dt;
 
     pos.x += Math.sin(heading) * speed * dt;
     pos.z += Math.cos(heading) * speed * dt;
@@ -1477,11 +1546,11 @@ function animate() {
   let offroad = false;
   let wallHit = false;
   if (racing) {
-    if (q.dist > HALF_ROAD + TRACK.curbWidth + WORLD.wallDist) {
+    if (q.dist > WALL_R) {
       wallHit = true;
       const dx = pos.x - samples[q.i].x, dz = pos.z - samples[q.i].z;
       const d = Math.hypot(dx, dz) || 1;
-      const threshold = HALF_ROAD + TRACK.curbWidth + WORLD.wallDist;
+      const threshold = WALL_R;
       pos.x = samples[q.i].x + (dx / d) * threshold;
       pos.z = samples[q.i].z + (dz / d) * threshold;
       speed *= 0.55; // eased from 0.4 — hitting a wall shouldn't cost almost all your speed
@@ -1563,27 +1632,32 @@ function animate() {
     camera.fov = fovCurrent; // keep in sync with the chase-cam branch, or FOV snaps when the orbit ends
     camera.updateProjectionMatrix();
   } else {
-    // --- chase camera: pullback, position/look lag (look-ahead, not at the kart), rumble, roll, FOV spring ---
+    // --- chase camera: kart-relative rig (B3). Only yaw lags behind the kart's heading;
+    // distance from the kart is always FOLLOW_DIST + pullback, never grows with speed.
+    // (The old position-lerp rig lagged by speed/rate — 8.7 units at top speed — which
+    // is what actually read as "camera far away when accelerating", not the base distances.)
+    camYaw += angleDelta(camYaw, heading) * (1 - Math.exp(-CAMCFG.yawSpring * dt));
+
     const pullbackTarget = CAMCFG.pullback * speedFrac;
     pullbackCurrent += (pullbackTarget - pullbackCurrent) * (1 - Math.exp(-CAMCFG.pullbackSpring * dt));
-    const effectiveDist = FOLLOW_DIST + pullbackCurrent;
+    const dist = FOLLOW_DIST + pullbackCurrent;
 
-    const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
-    const idealCam = new THREE.Vector3(pos.x - forward.x * effectiveDist, pos.y + FOLLOW_HEIGHT, pos.z - forward.z * effectiveDist);
-    const idealLook = new THREE.Vector3(pos.x + forward.x * CAMCFG.lookAhead, pos.y + LOOK_HEIGHT, pos.z + forward.z * CAMCFG.lookAhead);
-    camPos.lerp(idealCam, 1 - Math.exp(-3.0 * dt));
-    lookPos.lerp(idealLook, 1 - Math.exp(-9.0 * dt));
+    camPos.set(pos.x - Math.sin(camYaw) * dist, pos.y + FOLLOW_HEIGHT, pos.z - Math.cos(camYaw) * dist);
+    camForwardTmp.set(Math.sin(heading), 0, Math.cos(heading));
+    lookPos.set(pos.x + camForwardTmp.x * CAMCFG.lookAhead, pos.y + LOOK_HEIGHT, pos.z + camForwardTmp.z * CAMCFG.lookAhead);
 
     shakeMag *= Math.pow(0.002, dt);
     const rumble = speedFrac > CAMCFG.rumbleMaxSpeedFrac
       ? CAMCFG.rumbleMax * (speedFrac - CAMCFG.rumbleMaxSpeedFrac) / (1 - CAMCFG.rumbleMaxSpeedFrac)
       : 0;
     const totalShake = shakeMag + rumble;
-    const shakeOffset = totalShake > 0.001
-      ? new THREE.Vector3((Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake)
-      : new THREE.Vector3();
+    if (totalShake > 0.001) {
+      camShakeTmp.set((Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake, (Math.random() - 0.5) * totalShake);
+    } else {
+      camShakeTmp.set(0, 0, 0);
+    }
 
-    camera.position.copy(camPos).add(shakeOffset);
+    camera.position.copy(camPos).add(camShakeTmp);
     camera.lookAt(lookPos);
 
     const rollTarget = -steer * speedFrac * THREE.MathUtils.degToRad(CAMCFG.rollMaxDeg);
@@ -1617,4 +1691,6 @@ function animate() {
     renderer.render(scene, camera);
   }
 }
+if (KEYS_MODE || AUTOPILOT_MODE) controllerConnected = true;
+if (SKIP_LOBBY) startCountdown(performance.now());
 animate();
