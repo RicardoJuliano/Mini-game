@@ -142,7 +142,24 @@
     triggerAt: 1.0,
   };
 
-  const api = { PALETTE, TRACK, WORLD, HUD, VFX, CAMERA, FLOW, BOOST, DRIFT, BOOST_PADS, ROCKET_START, DRAFT };
+  // Kart-to-kart collisions (plan v4 §5.1): simple circle-circle push-apart between
+  // the player and bots, and bots against each other.
+  const KART = {
+    radius: 0.9,       // collision circle radius, world units
+    speedLoss: 0.12,   // fraction of speed each kart sheds on contact
+    shakeOnHit: 0.12,
+  };
+
+  // Light rubber-banding (plan §5, "tech stack" row): bots a bit faster when trailing
+  // the player, a bit slower when well ahead — keeps the pack close without being
+  // unfair, measured off the same unwrapped lapProgress used for lap counting.
+  const RUBBER_BAND = {
+    gapNorm: 70,    // lapProgress units (track samples) for the full effect to kick in
+    maxBoost: 0.06, // bot trailing by gapNorm or more: up to +6% target speed
+    maxSlow: 0.05,  // bot leading by gapNorm or more: up to -5% target speed
+  };
+
+  const api = { PALETTE, TRACK, WORLD, HUD, VFX, CAMERA, FLOW, BOOST, DRIFT, BOOST_PADS, ROCKET_START, DRAFT, KART, RUBBER_BAND };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else global.TiltVisualConfig = api;
 })(typeof window !== "undefined" ? window : globalThis);

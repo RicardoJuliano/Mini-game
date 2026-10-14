@@ -51,6 +51,8 @@ const BOOSTCFG = TiltVisualConfig.BOOST;
 const PADSCFG = TiltVisualConfig.BOOST_PADS;
 const ROCKETCFG = TiltVisualConfig.ROCKET_START;
 const DRAFTCFG = TiltVisualConfig.DRAFT;
+const KARTCFG = TiltVisualConfig.KART;
+const RBCFG = TiltVisualConfig.RUBBER_BAND;
 
 function angleDelta(a, b) {
   let d = (b - a) % (Math.PI * 2);
@@ -219,7 +221,7 @@ const SKY_RADIUS = CAM_FAR * 0.9;
 // ===================================================================
 // Grass ground (replaces the old grid plane)
 // ===================================================================
-const grassMesh = new THREE.Mesh(new THREE.PlaneGeometry(320, 320), toon(PALETTE.mint));
+const grassMesh = new THREE.Mesh(new THREE.PlaneGeometry(320, 320), new THREE.MeshToonMaterial({ map: grassTexture(), gradientMap: GRADIENT }));
 grassMesh.rotation.x = -Math.PI / 2;
 grassMesh.receiveShadow = true;
 scene.add(grassMesh);
@@ -309,12 +311,70 @@ function stripeTexture(colorA, colorB) {
   tex.repeat.set(1, 1);
   return tex;
 }
+// Procedural asphalt grain: per-pixel noise plus two faint tire-line streaks, baked
+// into the texture itself rather than the material color so the road doesn't read as
+// a flat block from a distance. No external texture files — stays dependency-free.
+function asphaltTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = PALETTE.asphalt;
+  ctx.fillRect(0, 0, 128, 128);
+  // Read the actual painted (sRGB) pixels back instead of re-deriving them from
+  // col() — col() converts to linear space for THREE.Color use, and reusing that
+  // as a canvas pixel value double-darkens the texture (road rendered near-black).
+  const img = ctx.getImageData(0, 0, 128, 128);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = (Math.random() - 0.5) * 28;
+    img.data[i] = THREE.MathUtils.clamp(img.data[i] + n, 0, 255);
+    img.data[i + 1] = THREE.MathUtils.clamp(img.data[i + 1] + n, 0, 255);
+    img.data[i + 2] = THREE.MathUtils.clamp(img.data[i + 2] + n, 0, 255);
+  }
+  ctx.putImageData(img, 0, 0);
+  ctx.globalAlpha = 0.07;
+  ctx.fillStyle = PALETTE.ink;
+  ctx.fillRect(38, 0, 8, 128);
+  ctx.fillRect(82, 0, 8, 128);
+  ctx.globalAlpha = 1;
+  // One texture period every 2 world units from the ribbon UV (same basis as
+  // stripeTexture) — repeat along length for fine grain instead of one giant smear.
+  const tex = finishTexture(new THREE.CanvasTexture(c));
+  tex.repeat.set(1, Math.max(1, Math.round(curve.getLength() / 2.4)));
+  return tex;
+}
+
+// Procedural grass speckle: scattered darker/lighter blade dabs over the base mint,
+// same self-contained approach as asphaltTexture — tiled across the ground plane.
+function grassTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = PALETTE.mint;
+  ctx.fillRect(0, 0, 64, 64);
+  // Light speckles stay a pale mint, not near-white: bright toon-lit pixels close to
+  // white cross the bloom threshold and glowed into a soft cyan patch under the kart
+  // (confirmed by screenshot — the flat-color grass never had pixels bright enough to
+  // bloom, so this only showed up once per-pixel variance was added here).
+  for (let i = 0; i < 260; i++) {
+    const x = Math.random() * 64, y = Math.random() * 64, r = 0.6 + Math.random() * 1.3;
+    ctx.globalAlpha = 0.07 + Math.random() * 0.08;
+    ctx.fillStyle = Math.random() < 0.5 ? "#1c6b4d" : "#6fe0ac";
+    ctx.beginPath();
+    ctx.ellipse(x, y, r * 0.4, r, Math.random() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  const tex = finishTexture(new THREE.CanvasTexture(c));
+  tex.repeat.set(60, 60);
+  return tex;
+}
+
 // Toon (not Basic) so curbs receive light/shadow like the road instead of flat-lit.
 const curbMaterial = layered(new THREE.MeshToonMaterial({ map: stripeTexture(PALETTE.coral, PALETTE.chalk), gradientMap: GRADIENT }), 2);
 
 // Road sits just above grass (both would otherwise share y=0 and z-fight — cause 1.2),
 // curbs above the road, start line above curbs; each level also gets a polygon offset.
-const roadMesh = ribbon(-HALF_ROAD, HALF_ROAD, 0.03, layered(toon(PALETTE.asphalt), 1));
+const roadMesh = ribbon(-HALF_ROAD, HALF_ROAD, 0.03, layered(new THREE.MeshToonMaterial({ map: asphaltTexture(), gradientMap: GRADIENT }), 1));
 const curbMeshes = [
   ribbon(HALF_ROAD, HALF_ROAD + TRACK.curbWidth, 0.05, curbMaterial),
   ribbon(-HALF_ROAD - TRACK.curbWidth, -HALF_ROAD, 0.05, curbMaterial),
@@ -1605,8 +1665,14 @@ function stepBot(bot, dt, now) {
   const desired = Math.atan2(target.x - bot.pos.x, target.z - bot.pos.z);
   const steer = THREE.MathUtils.clamp(angleDelta(bot.heading, desired) * 2.5, -1, 1);
 
+  // Light rubber-banding: a bot trailing the player's unwrapped lapProgress nudges
+  // its target speed up a little, a bot well ahead eases off — bounded so it never
+  // flips a race, just keeps the pack from running away in either direction.
+  const rbFrac = THREE.MathUtils.clamp((lapProgress - bot.lapProgress) / RBCFG.gapNorm, -1, 1);
+  const rubberBand = 1 + (rbFrac > 0 ? rbFrac * RBCFG.maxBoost : rbFrac * RBCFG.maxSlow);
+
   const brakeLook = Math.round(6 + bot.speed * 0.35);
-  const vTarget = bot.profile[(bot.trackIdx + brakeLook) % TRACK.samples];
+  const vTarget = bot.profile[(bot.trackIdx + brakeLook) % TRACK.samples] * rubberBand;
   const gas = bot.speed < vTarget - 0.5;
   const brakeHeld = bot.speed > vTarget + 1.5;
 
@@ -1620,7 +1686,7 @@ function stepBot(bot, dt, now) {
     bot.boostTimer = Math.max(0, bot.boostTimer - dt);
     if (bot.boostTimer === 0) bot.boostMul = 1;
   }
-  const cap = V.MAX_FWD * (boosting ? bot.boostMul : 1);
+  const cap = V.MAX_FWD * (boosting ? bot.boostMul : 1) * rubberBand;
   if (bot.speed > cap) bot.speed = Math.max(cap, bot.speed - BOOSTCFG.overspeedDecay * dt);
   bot.speed = Math.max(0, bot.speed); // bots don't reverse
 
@@ -1681,6 +1747,29 @@ function stepBot(bot, dt, now) {
     m.material.color.setHex(brakeHeld ? 0xff3030 : 0x400000);
     m.material.emissive.setHex(brakeHeld ? 0xff0000 : 0x000000);
   });
+}
+
+// Kart-to-kart collisions (plan v4 §5.1): simple circle-circle push-apart between
+// every pair of racers (player + bots), each pair checked once. A mild speed bleed
+// and a camera shake on any hit involving the player make contact read as physical
+// instead of karts silently sliding through each other.
+function resolveKartCollisions() {
+  const racers = [{ p: pos, isPlayer: true }, ...bots.map((b) => ({ p: b.pos, bot: b }))];
+  for (let i = 0; i < racers.length; i++) {
+    for (let j = i + 1; j < racers.length; j++) {
+      const a = racers[i], b = racers[j];
+      const dx = b.p.x - a.p.x, dz = b.p.z - a.p.z;
+      const dist = Math.hypot(dx, dz);
+      const minDist = KARTCFG.radius * 2;
+      if (dist >= minDist || dist < 1e-4) continue;
+      const nx = dx / dist, nz = dz / dist, overlap = (minDist - dist) / 2;
+      a.p.x -= nx * overlap; a.p.z -= nz * overlap;
+      b.p.x += nx * overlap; b.p.z += nz * overlap;
+      if (a.isPlayer) speed *= 1 - KARTCFG.speedLoss; else a.bot.speed *= 1 - KARTCFG.speedLoss;
+      if (b.isPlayer) speed *= 1 - KARTCFG.speedLoss; else b.bot.speed *= 1 - KARTCFG.speedLoss;
+      if (a.isPlayer || b.isPlayer) shakeMag = Math.max(shakeMag, KARTCFG.shakeOnHit);
+    }
+  }
 }
 
 // Position HUD (plan v4 §5.2): ranks the player against the bots by the same
@@ -1939,6 +2028,7 @@ function animate() {
   if (racing) checkBoostPad(now, q);
 
   bots.forEach((bot) => stepBot(bot, dt, now));
+  if (racing) resolveKartCollisions();
 
   kartRoot.position.copy(pos);
   kartRoot.rotation.y = visualHeading;
