@@ -136,7 +136,12 @@ if (!QUALITY_LOW) {
   composer.addPass(new THREE.RenderPass(scene, camera));
   // threshold 0.55/strength 0.7 bloomed almost the entire grass/sky, confirmed by
   // screenshot comparison against ?quality=low — raised threshold, cut strength.
-  const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.35, 0.4, 0.88);
+  // threshold 0.88 was still catching the directly-lit road/grass surfaces: their
+  // sun-facing pixels sat just under it, and bloom's wide additive blur smeared the
+  // new per-pixel texture grain into a flat average (confirmed by A/B screenshot
+  // with the composer forced off — grain only reads with bloom disabled). Raised
+  // further so only genuinely bright sources (sky, boost flashes, speed lines) bloom.
+  const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.35, 0.3, 0.97);
   composer.addPass(bloomPass);
   radialBlurPass = new THREE.ShaderPass(RadialBlurShader);
   radialBlurPass.renderToScreen = true;
@@ -218,13 +223,9 @@ const SKY_RADIUS = CAM_FAR * 0.9;
   scene.add(new THREE.Mesh(geo, mat));
 }
 
-// ===================================================================
-// Grass ground (replaces the old grid plane)
-// ===================================================================
-const grassMesh = new THREE.Mesh(new THREE.PlaneGeometry(320, 320), new THREE.MeshToonMaterial({ map: grassTexture(), gradientMap: GRADIENT }));
-grassMesh.rotation.x = -Math.PI / 2;
-grassMesh.receiveShadow = true;
-scene.add(grassMesh);
+// Grass ground mesh itself is built further below (after grassTexture() and its
+// normal map are generated, alongside the road's own textures) — see "Ground layer
+// materials" — since both now need the texture-generating functions defined there.
 
 // ===================================================================
 // Clouds: slow-drifting billboard sprites (plan v3 §4.2)
@@ -311,70 +312,163 @@ function stripeTexture(colorA, colorB) {
   tex.repeat.set(1, 1);
   return tex;
 }
-// Procedural asphalt grain: per-pixel noise plus two faint tire-line streaks, baked
-// into the texture itself rather than the material color so the road doesn't read as
-// a flat block from a distance. No external texture files — stays dependency-free.
+// Bakes a tangent-space normal map from a canvas's own luminance (a Sobel-style
+// height gradient), so flat procedural textures catch light like they have real
+// surface relief — no external texture files, still fully self-contained.
+function heightToNormalMap(srcCanvas, strength) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const src = srcCanvas.getContext("2d").getImageData(0, 0, w, h).data;
+  const height = (x, y) => {
+    const i = (((y + h) % h) * w + ((x + w) % w)) * 4;
+    return (src[i] + src[i + 1] + src[i + 2]) / (3 * 255);
+  };
+  const out = document.createElement("canvas");
+  out.width = w; out.height = h;
+  const octx = out.getContext("2d");
+  const img = octx.createImageData(w, h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = (height(x + 1, y) - height(x - 1, y)) * strength;
+      const dy = (height(x, y + 1) - height(x, y - 1)) * strength;
+      const len = Math.hypot(dx, dy, 1);
+      const i = (y * w + x) * 4;
+      img.data[i] = (-dx / len) * 127 + 128;
+      img.data[i + 1] = (-dy / len) * 127 + 128;
+      img.data[i + 2] = (1 / len) * 127 + 128;
+      img.data[i + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  const tex = finishTexture(new THREE.CanvasTexture(out));
+  tex.encoding = THREE.LinearEncoding; // normal maps carry vectors, not color — never sRGB
+  return tex;
+}
+
+// Procedural asphalt: per-pixel grain, patch/repair blotches, thin cracks and two
+// worn tire lines, baked into a 256px canvas (not the material color) so the road
+// reads as a real surface up close instead of a flat block. A normal map derived
+// from the same canvas catches the sun at a grazing angle for actual surface relief
+// instead of a flat-shaded or toon-banded look.
 function asphaltTexture() {
   const c = document.createElement("canvas");
-  c.width = c.height = 128;
+  c.width = c.height = 256;
   const ctx = c.getContext("2d");
-  ctx.fillStyle = PALETTE.asphalt;
-  ctx.fillRect(0, 0, 128, 128);
-  // Read the actual painted (sRGB) pixels back instead of re-deriving them from
-  // col() — col() converts to linear space for THREE.Color use, and reusing that
-  // as a canvas pixel value double-darkens the texture (road rendered near-black).
-  const img = ctx.getImageData(0, 0, 128, 128);
+  // A touch lighter than the base PALETTE.asphalt: ACES filmic tone mapping (the
+  // renderer's global tone curve — see renderer.toneMapping) compresses dark tones
+  // hard, and the original near-black base left no headroom for grain/patches/cracks
+  // to survive that compression (confirmed: visible on the raw canvas, invisible
+  // in-game). A lighter base plus much higher contrast keeps it readable after both
+  // lighting and tone mapping.
+  ctx.fillStyle = "#4a4164";
+  ctx.fillRect(0, 0, 256, 256);
+  const img = ctx.getImageData(0, 0, 256, 256);
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 28;
+    const n = (Math.random() - 0.5) * 90;
     img.data[i] = THREE.MathUtils.clamp(img.data[i] + n, 0, 255);
     img.data[i + 1] = THREE.MathUtils.clamp(img.data[i + 1] + n, 0, 255);
     img.data[i + 2] = THREE.MathUtils.clamp(img.data[i + 2] + n, 0, 255);
   }
   ctx.putImageData(img, 0, 0);
-  ctx.globalAlpha = 0.07;
+  // Resurface patches: a handful of soft rectangles a shade off the base asphalt.
+  for (let i = 0; i < 10; i++) {
+    ctx.globalAlpha = 0.3 + Math.random() * 0.25;
+    ctx.fillStyle = Math.random() < 0.5 ? "#171220" : "#6a5f8c";
+    const w = 20 + Math.random() * 50, h = 14 + Math.random() * 30;
+    ctx.save();
+    ctx.translate(Math.random() * 256, Math.random() * 256);
+    ctx.rotate(Math.random() * Math.PI);
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+  // Thin cracks: short jointed dark strokes.
+  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = PALETTE.ink;
+  ctx.lineWidth = 3;
+  for (let i = 0; i < 14; i++) {
+    let x = Math.random() * 256, y = Math.random() * 256;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    const segs = 2 + Math.floor(Math.random() * 3);
+    for (let s = 0; s < segs; s++) {
+      x += (Math.random() - 0.5) * 30;
+      y += (Math.random() - 0.5) * 30;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  // Worn tire lines down the racing line, darker and wider than before.
+  ctx.globalAlpha = 0.3;
   ctx.fillStyle = PALETTE.ink;
-  ctx.fillRect(38, 0, 8, 128);
-  ctx.fillRect(82, 0, 8, 128);
+  ctx.fillRect(76, 0, 16, 256);
+  ctx.fillRect(164, 0, 16, 256);
   ctx.globalAlpha = 1;
   // One texture period every 2 world units from the ribbon UV (same basis as
   // stripeTexture) — repeat along length for fine grain instead of one giant smear.
   const tex = finishTexture(new THREE.CanvasTexture(c));
-  tex.repeat.set(1, Math.max(1, Math.round(curve.getLength() / 2.4)));
-  return tex;
+  tex.repeat.set(1, Math.max(1, Math.round(curve.getLength() / 4)));
+  const normalMap = heightToNormalMap(c, 2.2);
+  normalMap.repeat.copy(tex.repeat);
+  return { map: tex, normalMap };
 }
 
-// Procedural grass speckle: scattered darker/lighter blade dabs over the base mint,
-// same self-contained approach as asphaltTexture — tiled across the ground plane.
+// Procedural grass: blade-stroke texture plus scattered dirt/clay patches, same
+// self-contained canvas approach as asphaltTexture, with a matching normal map so
+// the lawn isn't perfectly flat under the sun either.
 function grassTexture() {
   const c = document.createElement("canvas");
-  c.width = c.height = 64;
+  c.width = c.height = 128;
   const ctx = c.getContext("2d");
   ctx.fillStyle = PALETTE.mint;
-  ctx.fillRect(0, 0, 64, 64);
-  // Light speckles stay a pale mint, not near-white: bright toon-lit pixels close to
-  // white cross the bloom threshold and glowed into a soft cyan patch under the kart
-  // (confirmed by screenshot — the flat-color grass never had pixels bright enough to
-  // bloom, so this only showed up once per-pixel variance was added here).
-  for (let i = 0; i < 260; i++) {
-    const x = Math.random() * 64, y = Math.random() * 64, r = 0.6 + Math.random() * 1.3;
-    ctx.globalAlpha = 0.07 + Math.random() * 0.08;
-    ctx.fillStyle = Math.random() < 0.5 ? "#1c6b4d" : "#6fe0ac";
+  ctx.fillRect(0, 0, 128, 128);
+  // Dirt/clay patches first, blades drawn on top so they still read through.
+  for (let i = 0; i < 7; i++) {
+    ctx.globalAlpha = 0.14 + Math.random() * 0.1;
+    ctx.fillStyle = "#8a6a4a";
+    const r = 6 + Math.random() * 10;
     ctx.beginPath();
-    ctx.ellipse(x, y, r * 0.4, r, Math.random() * Math.PI, 0, Math.PI * 2);
+    ctx.ellipse(Math.random() * 128, Math.random() * 128, r, r * 0.6, Math.random() * Math.PI, 0, Math.PI * 2);
     ctx.fill();
+  }
+  // Short blade strokes, not soft dabs — a stroke reads as a texture, a dab reads as a blur.
+  // Light strokes stay a pale mint, not near-white: bright toon/standard-lit pixels close
+  // to white crossed the bloom threshold and glowed into a soft cyan patch under the kart
+  // (confirmed by screenshot) — the old flat-color grass never had pixels bright enough to.
+  for (let i = 0; i < 700; i++) {
+    const x = Math.random() * 128, y = Math.random() * 128, len = 1.5 + Math.random() * 3.5;
+    const a = Math.random() * Math.PI;
+    ctx.globalAlpha = 0.1 + Math.random() * 0.12;
+    ctx.strokeStyle = Math.random() < 0.5 ? "#1c6b4d" : "#6fe0ac";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+    ctx.stroke();
   }
   ctx.globalAlpha = 1;
   const tex = finishTexture(new THREE.CanvasTexture(c));
-  tex.repeat.set(60, 60);
-  return tex;
+  tex.repeat.set(50, 50);
+  const normalMap = heightToNormalMap(c, 1.6);
+  normalMap.repeat.copy(tex.repeat);
+  return { map: tex, normalMap };
 }
 
-// Toon (not Basic) so curbs receive light/shadow like the road instead of flat-lit.
-const curbMaterial = layered(new THREE.MeshToonMaterial({ map: stripeTexture(PALETTE.coral, PALETTE.chalk), gradientMap: GRADIENT }), 2);
+const asphalt = asphaltTexture();
+const grass = grassTexture();
+
+// Standard (not Toon) materials for the ground layers: the normal maps above need a
+// lighting model that reads a full gradient + grazing-angle highlight, which toon's
+// hard-stepped gradient band flattens back out — this is the actual "more realistic"
+// visual delta from the flat-color/toon-banded look before.
+const grassMesh = new THREE.Mesh(new THREE.PlaneGeometry(320, 320), new THREE.MeshStandardMaterial({ map: grass.map, normalMap: grass.normalMap, roughness: 1, metalness: 0 }));
+grassMesh.rotation.x = -Math.PI / 2;
+grassMesh.receiveShadow = true;
+scene.add(grassMesh);
+
+const curbMaterial = layered(new THREE.MeshStandardMaterial({ map: stripeTexture(PALETTE.coral, PALETTE.chalk), roughness: 0.55, metalness: 0.08 }), 2);
 
 // Road sits just above grass (both would otherwise share y=0 and z-fight — cause 1.2),
 // curbs above the road, start line above curbs; each level also gets a polygon offset.
-const roadMesh = ribbon(-HALF_ROAD, HALF_ROAD, 0.03, layered(new THREE.MeshToonMaterial({ map: asphaltTexture(), gradientMap: GRADIENT }), 1));
+const roadMesh = ribbon(-HALF_ROAD, HALF_ROAD, 0.03, layered(new THREE.MeshStandardMaterial({ map: asphalt.map, normalMap: asphalt.normalMap, roughness: 0.98, metalness: 0 }), 1));
 const curbMeshes = [
   ribbon(HALF_ROAD, HALF_ROAD + TRACK.curbWidth, 0.05, curbMaterial),
   ribbon(-HALF_ROAD - TRACK.curbWidth, -HALF_ROAD, 0.05, curbMaterial),
