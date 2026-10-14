@@ -82,30 +82,67 @@
     distanceMarkerEvery: 50, // world units (approximated via sample stride)
   };
 
-  // Drift + mini-turbo (plan v3 §5.4) — reuses the existing GAS/BRAKE buttons, no new input.
+  // Unified boost system (plan v4 §3.1): every boost source (mini-turbo tiers, pads,
+  // rocket start, slipstream) goes through the same applyBoost()/soft-cap machinery in
+  // host.js, instead of each source hand-rolling its own speed clamp.
+  const BOOST = {
+    sources: {
+      mt1: { mul: 1.15, dur: 0.7, impulse: 3, color: "#4d8dff" },   // blue mini-turbo
+      mt2: { mul: 1.22, dur: 1.1, impulse: 4, color: "#ffb02e" },   // orange
+      mt3: { mul: 1.30, dur: 1.6, impulse: 5, color: "#c04dff" },   // purple
+      pad: { mul: 1.30, dur: 1.0, impulse: 6, color: "#ffd23f" },
+      rocket: { mul: 1.25, dur: 1.2, impulse: 8, color: "#ffffff" },
+      draft: { mul: 1.10, dur: 1.0, impulse: 2, color: "#bfe6ff" },
+    },
+    propel: 40,           // units/s^2 pushed forward while boosting, gas held or not
+    overspeedDecay: 9,    // units/s^2 back down to the normal cap after a boost (no hard clamp)
+    offroadDecay: 30,     // units/s^2 down to the off-road cap when not boosting
+    chainBonus: 0.25,     // extra seconds when a boost starts while another is already active
+    gripMul: 1.15,        // a bit more grip while boosting
+    ignoresOffroad: true, // boosting through grass keeps full speed (risk/reward)
+  };
+
+  // Drift + mini-turbo (plan v4 §3.2) — reuses the existing GAS/BRAKE buttons, no new input.
   const DRIFT = {
     steerThreshold: 0.35,
     speedThreshold: 0.5,   // fraction of MAX_FWD required to start a drift
     turnRateBonus: 1.3,
-    speedDecay: 6,          // units/sec^2 lost while drifting
+    speedDecay: 4,          // units/sec^2 lost while drifting (was 6 — a long drift shouldn't be a trap)
+    minSpeedFrac: 0.45,     // drift self-cancels (no boost) if speed drops below this fraction of max
     bodyAngleDeg: 28,
-    chargeRate: 1,          // charge seconds accumulate 1:1 with real time while drifting
+    hopAmp: 0.15, hopDur: 0.18, // visual-only hop at drift start
     tiers: [
-      { minCharge: 0.6, boostMul: 1.15, boostDur: 0.5, color: "#4d8dff" },
-      { minCharge: 1.2, boostMul: 1.25, boostDur: 0.8, color: "#ffd23f" },
-      { minCharge: 2.0, boostMul: 1.35, boostDur: 1.2, color: "#c04dff" },
+      { minCharge: 0.7, source: "mt1" },
+      { minCharge: 1.4, source: "mt2" },
+      { minCharge: 2.2, source: "mt3" },
     ],
   };
 
-  // Boost pads + medal targets (plan v3 §5.5)
+  // Boost pads (plan v4 §3.3): track-space hitbox (trackIdx + lateral), not a world-space
+  // circle — a circle on a 1.6x2.4 pad offset 2.2 off-center was easy to miss visually.
   const BOOST_PADS = {
-    // [sampleIndexFraction, lateral offset from center line] — off the obvious racing line
-    spots: [[0.28, 2.2], [0.62, -2.0]],
-    speedMul: 1.3,
-    duration: 0.8,
+    // [sampleIndexFraction, lateral offset from center line]
+    spots: [[0.1, 2.6], [0.28, 2.2], [0.5, -2.6], [0.62, -2.0]],
+    halfLen: 2.0, halfWidth: 1.5 + 0.6, // track-space box half-extents for the hitbox
+    cooldownMs: 800,       // per kart, not per pad
   };
 
-  const api = { PALETTE, TRACK, WORLD, HUD, VFX, CAMERA, FLOW, DRIFT, BOOST_PADS };
+  // Rocket start (plan v4 §3.4)
+  const ROCKET_START = {
+    windowMs: 350,     // gas pressed in the last N ms before GO => rocket
+    stallMinMs: 1000,  // gas pressed before this => too early, risk of stall
+    stallDurSec: 0.6,
+  };
+
+  // Slipstream / draft (plan v4 §3.5)
+  const DRAFT = {
+    minDist: 2, maxDist: 10, maxLateral: 1.6, // cone behind another kart that counts as drafting
+    minSpeedFrac: 0.7,
+    buildRate: 1, decayRate: 2, // draft meter units/sec
+    triggerAt: 1.0,
+  };
+
+  const api = { PALETTE, TRACK, WORLD, HUD, VFX, CAMERA, FLOW, BOOST, DRIFT, BOOST_PADS, ROCKET_START, DRAFT };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else global.TiltVisualConfig = api;
 })(typeof window !== "undefined" ? window : globalThis);

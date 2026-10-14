@@ -25,6 +25,20 @@ const resultsEl = document.getElementById("results");
 const overlayEl = document.getElementById("overlay");
 const minimapCanvas = document.getElementById("hud-minimap");
 const speedlinesCanvas = document.getElementById("speedlines");
+const boostFlashEl = document.getElementById("boost-flash");
+const turboPopEl = document.getElementById("hud-turbo-pop");
+
+// Boost feedback (plan v4 §3.7): edge flash + HUD pop in the source's color, every time.
+function triggerBoostFx(hexColor) {
+  boostFlashEl.style.background = hexColor;
+  boostFlashEl.classList.remove("show");
+  void boostFlashEl.offsetWidth;
+  boostFlashEl.classList.add("show");
+  turboPopEl.style.color = hexColor;
+  turboPopEl.classList.remove("show");
+  void turboPopEl.offsetWidth;
+  turboPopEl.classList.add("show");
+}
 
 const PALETTE = TiltVisualConfig.PALETTE;
 const TRACK = TiltVisualConfig.TRACK;
@@ -33,6 +47,10 @@ const HUDCFG = TiltVisualConfig.HUD;
 const VFXCFG = TiltVisualConfig.VFX;
 const V = TiltProtocol.VEHICLE_CONFIG;
 const DRIFTCFG = TiltVisualConfig.DRIFT;
+const BOOSTCFG = TiltVisualConfig.BOOST;
+const PADSCFG = TiltVisualConfig.BOOST_PADS;
+const ROCKETCFG = TiltVisualConfig.ROCKET_START;
+const DRAFTCFG = TiltVisualConfig.DRAFT;
 
 function angleDelta(a, b) {
   let d = (b - a) % (Math.PI * 2);
@@ -596,8 +614,9 @@ loadGLB("flagCheckers.glb").then((base) => {
   });
 }).catch((err) => console.warn("flagCheckers.glb failed to load, skipping:", err));
 
-// Boost pads (plan v3 §5.5): placed off the obvious racing line, so taking one is a choice.
-const BOOST_PADS = TiltVisualConfig.BOOST_PADS;
+// Boost pads (plan v4 §3.3): placed off the obvious racing line, so taking one is a choice.
+// Track-space hitbox (trackIdx + signed lateral offset), not a small world-space circle —
+// a circle on a 1.6x2.4 pad offset 2.2 off-center was easy to miss even driving over it.
 // Scrolling arrow texture (plan v3 §4.2) — a chevron repeated down the pad, offset animated each frame.
 function boostArrowTexture() {
   const c = document.createElement("canvas");
@@ -610,18 +629,18 @@ function boostArrowTexture() {
   tex.repeat.set(1, 3);
   return tex;
 }
-const boostPads = BOOST_PADS.spots.map(([frac, lateral]) => {
-  const i = Math.round(frac * TRACK.samples) % TRACK.samples;
-  const p = samples[i], t = tangents[i];
+const boostPads = PADSCFG.spots.map(([frac, lateral]) => {
+  const idx = Math.round(frac * TRACK.samples) % TRACK.samples;
+  const p = samples[idx], t = tangents[idx];
   const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
   const center = new THREE.Vector3(p.x + n.x * lateral, 0.06, p.z + n.z * lateral);
   const arrowTex = boostArrowTexture();
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 2.4), layered(new THREE.MeshBasicMaterial({ map: arrowTex }), 3));
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(PADSCFG.halfWidth * 2, PADSCFG.halfLen * 2), layered(new THREE.MeshBasicMaterial({ map: arrowTex }), 3));
   mesh.rotation.x = -Math.PI / 2;
   mesh.rotation.z = Math.atan2(t.x, t.z);
   mesh.position.copy(center);
   scene.add(mesh);
-  return { center, lastTriggeredAt: -Infinity, tex: arrowTex };
+  return { idx, lateral, tex: arrowTex };
 });
 function updateBoostPads(dt) {
   boostPads.forEach((pad) => { pad.tex.offset.y -= dt * 0.6; });
@@ -789,7 +808,7 @@ let wallWobbleTimer = 0; // counts down from 1 after a wall hit; drives a damped
 
 function triggerWallWobble() { wallWobbleTimer = 1; }
 
-function animateBody(dt, steerVal, speedVal, isDrifting, isBoosting, isOffroad, driftDirVal) {
+function animateBody(dt, steerVal, speedVal, isDrifting, isBoosting, isOffroad, driftDirVal, hopT) {
   const speedFrac = Math.min(1, Math.abs(speedVal) / V.MAX_FWD);
   const accel = (speedVal - prevSpeedForBody) / Math.max(dt, 1e-3);
   prevSpeedForBody = speedVal;
@@ -809,9 +828,12 @@ function animateBody(dt, steerVal, speedVal, isDrifting, isBoosting, isOffroad, 
   // Idle vibration: tiny high-frequency buzz whenever the engine is "on" (racing) and near-stopped.
   const idleBuzz = speedFrac < 0.05 ? Math.sin(now / 35) * 0.006 : 0;
 
+  // Drift hop: a quick visual pop at the moment a drift starts (plan v4 §3.2).
+  const hop = hopT >= 0 && hopT <= DRIFTCFG.hopDur ? Math.sin((hopT / DRIFTCFG.hopDur) * Math.PI) * DRIFTCFG.hopAmp : 0;
+
   bodyPivot.rotation.z = bodyRoll + wobble;
   bodyPivot.rotation.x = bodyPitch;
-  bodyPivot.position.y = Math.sin(now / 90) * BODY.bounceAmp * speedFrac + idleBuzz;
+  bodyPivot.position.y = Math.sin(now / 90) * BODY.bounceAmp * speedFrac + idleBuzz + hop;
   bodyPivot.position.x = idleBuzz * 0.6;
   bodyPivot.scale.set(1 + wallWobbleTimer * 0.05, squash, 1 + wallWobbleTimer * 0.05);
 
@@ -853,15 +875,34 @@ let brakeHold = 0;
 let heading = 0;      // real travel direction — position always integrates from this
 let visualHeading = 0; // kart model orientation; diverges from `heading` only while drifting
 const pos = new THREE.Vector3(0, 0, 0);
-let prevGas = false, prevBrake = false, prevRawGas = false, prevWallHit = false;
+let prevGas = false, prevBrake = false, prevRawGas = false;
+let wallCooldown = 0; // seconds; gates the wall slide/feedback to once per contact (plan v4 §3.6)
 let boosting = false; // set by the drift/mini-turbo system below
 
-// Drift + mini-turbo (plan v3 §5.4)
+// Drift + mini-turbo (plan v4 §3.2)
 let drifting = false;
 let driftCharge = 0;
 let driftDir = 1;
+let driftHopT = -1; // seconds since drift start; drives the visual hop, <0 = not hopping
+
+// Unified boost state (plan v4 §3.1) — every source (mini-turbo, pad, rocket, draft)
+// goes through applyBoost() below instead of each hand-rolling its own speed clamp.
 let boostTimer = 0;
-let boostSpeedMul = 1;
+let boostMul = 1;
+let boostSource = null;
+let padCooldownUntil = 0;
+
+// Rocket start (plan v4 §3.4)
+let gasPressAt = -Infinity;
+let stallTimer = 0;
+
+// Slipstream (plan v4 §3.5) — meaningful once bots exist to draft off of.
+let draftMeter = 0;
+
+// Off-road state persists one frame: the unified boost/speed cap (above, in animate())
+// needs to know "was I off-road" before this frame's wall/off-road check (which runs
+// after position integration) has a fresh answer for the frame just computed.
+let offroadPrev = false;
 
 function resetKartToStart() {
   pos.copy(samples[0]);
@@ -872,8 +913,14 @@ function resetKartToStart() {
   brakeHold = 0;
   drifting = false;
   driftCharge = 0;
+  driftHopT = -1;
   boostTimer = 0;
+  boostMul = 1;
+  boostSource = null;
   boosting = false;
+  gasPressAt = -Infinity;
+  stallTimer = 0;
+  draftMeter = 0;
   trackIdx = 0;
   trackQuery(pos, true);
 }
@@ -1106,6 +1153,38 @@ const gameAudio = (() => {
   return { update, wallThump, countdownBeep, boostWhoosh, resume };
 })();
 
+// Every boost source funnels through here: strongest multiplier wins, a new boost never
+// shortens the current one (only extends it, with a small bonus when chaining), and the
+// kick is an instant speed addition rather than a slow ACCEL-limited climb to the cap.
+function applyBoost(sourceName) {
+  const s = BOOSTCFG.sources[sourceName];
+  const chained = boostTimer > 0;
+  boostMul = Math.max(chained ? boostMul : 1, s.mul);
+  boostTimer = Math.max(boostTimer, s.dur) + (chained ? BOOSTCFG.chainBonus : 0);
+  boostSource = sourceName;
+  speed = Math.min(Math.max(speed, V.MAX_FWD) + s.impulse, V.MAX_FWD * boostMul);
+  spawnDriftSparks(s.color);
+  gameAudio.boostWhoosh();
+  shakeMag = Math.max(shakeMag, 0.15);
+  triggerBoostFx(s.color);
+}
+
+function checkBoostPad(now, qResult) {
+  if (now < padCooldownUntil) return;
+  const t = tangents[qResult.i];
+  const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
+  const myLateral = (pos.x - samples[qResult.i].x) * n.x + (pos.z - samples[qResult.i].z) * n.z;
+  for (const pad of boostPads) {
+    let di = Math.abs(qResult.i - pad.idx);
+    if (di > TRACK.samples / 2) di = TRACK.samples - di;
+    if (di * sampleSpacing <= PADSCFG.halfLen && Math.abs(myLateral - pad.lateral) <= PADSCFG.halfWidth) {
+      applyBoost("pad");
+      padCooldownUntil = now + PADSCFG.cooldownMs;
+      return;
+    }
+  }
+}
+
 const audioPromptEl = document.getElementById("audio-prompt");
 function unlockAudio() {
   gameAudio.resume();
@@ -1206,10 +1285,13 @@ const hud = (() => {
     countdown(total) {
       [3, 2, 1].forEach((n, i) => setTimeout(() => banner(String(n)), i * (total / 3)));
     },
-    update(now, speedVal, race) {
+    update(now, speedVal, race, posVal, totalRacers) {
       const racing = race.state === "RACING";
       set("hud-lap", String(Math.max(1, race.lap)), true);
       set("hud-laps", String(TRACK.laps));
+      set("hud-pos", String(posVal), true);
+      set("hud-pos-total", String(totalRacers));
+      el("hud-pos").classList.toggle("p1", posVal === 1);
       set("hud-time", racing ? fmt(now - race.t0) : fmt(0));
       set("hud-best", fmt(race.best), true);
 
@@ -1239,7 +1321,7 @@ const hud = (() => {
       el("hud-conn-dot").classList.toggle("off", !connected);
       set("hud-rtt", connected ? `${rttMs.toFixed(0)} ms` : "-- ms");
     },
-    setDrift(isDrifting, charge, tiers) {
+    setDrift(isDrifting, charge, tiers, sources) {
       el("hud-drift").hidden = !isDrifting;
       if (!isDrifting) return;
       const maxCharge = tiers[tiers.length - 1].minCharge;
@@ -1247,7 +1329,7 @@ const hud = (() => {
       const tier = [...tiers].reverse().find((t) => charge >= t.minCharge);
       const fill = el("hud-drift-fill");
       fill.style.width = `${(frac * 100).toFixed(0)}%`;
-      fill.style.backgroundColor = tier ? tier.color : "#4d8dff";
+      fill.style.backgroundColor = tier ? sources[tier.source].color : "#4d8dff";
     },
   };
 })();
@@ -1272,6 +1354,7 @@ function resetLapProgress() { lapProgress = 0; lapLastIdx = trackIdx; }
 
 function startCountdown(now) {
   resetKartToStart();
+  resetBotsToGrid();
   camYaw = heading;
   lastTrackIdxForWrongWay = 0;
   RACE.wrongWayTime = 0;
@@ -1346,6 +1429,16 @@ function updateRace(now, gasPressedEdge) {
         gameAudio.countdownBeep(true);
         setGantryLights(3, true);
         setTimeout(() => setGantryLights(0, false), 600); // lights out shortly after go
+
+        // Rocket start (plan v4 §3.4): only a press that happened DURING the countdown
+        // counts — the tap that launched the countdown from the lobby is ignored.
+        const msBeforeGo = RACE.countdownEnd - gasPressAt;
+        if (rawGas && msBeforeGo >= 0 && msBeforeGo <= ROCKETCFG.windowMs) {
+          applyBoost("rocket");
+          hud.banner("LARGADA PERFEITA!", "go");
+        } else if (rawGas && msBeforeGo > ROCKETCFG.stallMinMs && msBeforeGo < HUDCFG.countdownMs) {
+          stallTimer = ROCKETCFG.stallDurSec;
+        }
       }
       break;
     case "RACING":
@@ -1355,6 +1448,255 @@ function updateRace(now, gasPressedEdge) {
       if (gasPressedEdge && now - RACE.finishedAt > HUDCFG.resultsRestartDelayMs) startCountdown(now);
       break;
   }
+}
+
+// ===================================================================
+// Bots (plan v4 §4): a parallel, self-contained system. Deliberately NOT built on a
+// shared stepKart() with the player — that would mean rewriting the player's already
+// verified physics into a generic form blind, which is a worse risk than some
+// duplication between this and the player's inline physics above.
+// ===================================================================
+
+// Racing line (plan v4 §4.1): a lateral offset toward the inside of each corner,
+// smoothed, plus a speed profile from grip with a backward brake-ahead pass.
+function computeRacingLine() {
+  const N = TRACK.samples;
+  const curv = samples.map((_, i) => {
+    const a = tangents[(i - 3 + N) % N], b = tangents[(i + 3) % N];
+    return (a.x * b.z - a.z * b.x) / (6 * sampleSpacing);
+  });
+  const maxOff = HALF_ROAD - 1.2;
+  const rawOff = curv.map((c) => THREE.MathUtils.clamp(-c * 60, -maxOff, maxOff));
+  const lineOff = rawOff.map((_, i) => {
+    let sum = 0;
+    for (let k = -8; k <= 8; k++) sum += rawOff[(i + k + N) % N];
+    return sum / 17;
+  });
+  const linePts = samples.map((p, i) => {
+    const t = tangents[i];
+    const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
+    return new THREE.Vector3(p.x + n.x * lineOff[i], 0, p.z + n.z * lineOff[i]);
+  });
+  const lineCurv = linePts.map((p, i) => {
+    const prev = linePts[(i - 3 + N) % N], next = linePts[(i + 3) % N];
+    const d1 = new THREE.Vector3().subVectors(p, prev), d2 = new THREE.Vector3().subVectors(next, p);
+    const dist = prev.distanceTo(next);
+    if (dist < 1e-3) return 0;
+    const cross = d1.x * d2.z - d1.z * d2.x;
+    return cross / (d1.length() * d2.length() * dist * 0.5 || 1);
+  });
+  function speedProfile(skill, gripUse, brakeUse) {
+    const v = lineCurv.map((c) => Math.min(V.MAX_FWD * skill, Math.sqrt((V.LAT_GRIP * gripUse) / Math.max(Math.abs(c), 1e-4))));
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = N - 1; i >= 0; i--) {
+        const next = v[(i + 1) % N];
+        v[i] = Math.min(v[i], Math.sqrt(next * next + 2 * V.BRAKE * brakeUse * sampleSpacing));
+      }
+    }
+    return v;
+  }
+  return { linePts, speedProfile };
+}
+const racingLine = computeRacingLine();
+
+// Simplified rig: body/nose/wheels/driver silhouette, no suspension/arms/flames —
+// the player's rig keeps its full animation; bots trade some fidelity for not having
+// to generalize animateBody() into a per-kart form blind.
+function buildBotRig(colorHex) {
+  const root = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.42, 1.7), toon(colorHex));
+  body.position.set(0, 0.5, -0.05);
+  body.castShadow = true;
+  root.add(body);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.3, 0.5), toon(colorHex));
+  nose.position.set(0, 0.42, 0.95);
+  nose.castShadow = true;
+  root.add(nose);
+  const driver = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.4, 10), toon(PALETTE.dusk));
+  driver.position.set(0, 0.9, -0.1);
+  driver.castShadow = true;
+  root.add(driver);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), toon(PALETTE.chalk));
+  head.position.set(0, 1.25, -0.1);
+  head.castShadow = true;
+  root.add(head);
+  const frontWheelGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.24, 12);
+  const rearWheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.3, 12);
+  const wheelMat = toon(PALETTE.ink);
+  const wheels = [];
+  [[-0.6, 0.28, 0.62, frontWheelGeo], [0.6, 0.28, 0.62, frontWheelGeo],
+   [-0.66, 0.36, -0.68, rearWheelGeo], [0.66, 0.36, -0.68, rearWheelGeo]].forEach(([x, y, z, geo]) => {
+    const w = new THREE.Mesh(geo, wheelMat);
+    w.rotation.z = Math.PI / 2;
+    w.position.set(x, y, z);
+    w.castShadow = true;
+    root.add(w);
+    wheels.push(w);
+  });
+  const brakeLightGeo2 = new THREE.BoxGeometry(0.16, 0.1, 0.05);
+  const brakeLightMat = new THREE.MeshStandardMaterial({ color: 0x400000, emissive: 0x000000, toneMapped: false });
+  const brakeLights = [-0.35, 0.35].map((x) => {
+    const m = new THREE.Mesh(brakeLightGeo2, brakeLightMat.clone());
+    m.position.set(x, 0.5, -0.88);
+    root.add(m);
+    return m;
+  });
+  const blobShadow = new THREE.Mesh(new THREE.CircleGeometry(1.1, 16), layered(new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false }), 4));
+  blobShadow.rotation.x = -Math.PI / 2;
+  blobShadow.position.y = 0.07;
+  root.add(blobShadow);
+  scene.add(root);
+  return { root, wheels, frontWheels: [wheels[0], wheels[1]], brakeLights };
+}
+
+const BOT_DEFS = [
+  { name: "Faísca", color: PALETTE.mint, skill: 0.95, gripUse: 0.88, brakeUse: 0.85 },
+  { name: "Pimenta", color: PALETTE.sun, skill: 0.93, gripUse: 0.85, brakeUse: 0.82 },
+  { name: "Tufão", color: PALETTE.dusk, skill: 0.97, gripUse: 0.90, brakeUse: 0.88 },
+];
+const bots = BOT_DEFS.map((def, idx) => ({
+  name: def.name, color: def.color, skill: def.skill,
+  rig: buildBotRig(def.color),
+  profile: racingLine.speedProfile(def.skill, def.gripUse, def.brakeUse),
+  pos: new THREE.Vector3(), heading: 0, speed: 0, wheelSpin: 0,
+  trackIdx: 0, lapProgress: 0, lapLastIdx: 0, lap: 1, finished: false, finishTime: 0,
+  boostTimer: 0, boostMul: 1, padCooldownUntil: 0,
+  gridSlot: idx,
+}));
+
+function botTrackQuery(bot) {
+  let best = bot.trackIdx, bestD = Infinity;
+  for (let k = -20; k <= 20; k++) {
+    const i = (bot.trackIdx + k + TRACK.samples) % TRACK.samples;
+    const d = (samples[i].x - bot.pos.x) ** 2 + (samples[i].z - bot.pos.z) ** 2;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  bot.trackIdx = best;
+  return { i: best, dist: Math.sqrt(bestD) };
+}
+
+function resetBotsToGrid() {
+  const t0 = tangents[0];
+  const n0 = new THREE.Vector3(-t0.z, 0, t0.x).normalize();
+  const startHeading = Math.atan2(t0.x, t0.z);
+  bots.forEach((bot) => {
+    const row = Math.floor(bot.gridSlot / 2), col = bot.gridSlot % 2;
+    const back = 4 + row * 3;
+    const lateral = col === 0 ? -2.5 : 2.5;
+    bot.pos.copy(samples[0]).addScaledVector(t0, -back).addScaledVector(n0, lateral);
+    bot.heading = startHeading;
+    bot.rig.root.position.copy(bot.pos);
+    bot.rig.root.rotation.y = bot.heading;
+    bot.speed = 0;
+    bot.trackIdx = 0;
+    bot.lapProgress = 0; bot.lapLastIdx = 0; bot.lap = 1; bot.finished = false; bot.finishTime = 0;
+    bot.boostTimer = 0; bot.boostMul = 1; bot.padCooldownUntil = 0;
+  });
+}
+
+// Pure-pursuit driver (plan v4 §4.2): steers at a look-ahead point on the racing line,
+// brakes/accelerates toward that point's entry in the speed profile.
+function stepBot(bot, dt, now) {
+  if (RACE.state !== "RACING" || bot.finished) return;
+
+  const look = Math.round(8 + bot.speed * 0.25);
+  const li = (bot.trackIdx + look) % TRACK.samples;
+  const target = racingLine.linePts[li];
+  const desired = Math.atan2(target.x - bot.pos.x, target.z - bot.pos.z);
+  const steer = THREE.MathUtils.clamp(angleDelta(bot.heading, desired) * 2.5, -1, 1);
+
+  const brakeLook = Math.round(6 + bot.speed * 0.35);
+  const vTarget = bot.profile[(bot.trackIdx + brakeLook) % TRACK.samples];
+  const gas = bot.speed < vTarget - 0.5;
+  const brakeHeld = bot.speed > vTarget + 1.5;
+
+  if (gas) bot.speed += V.ACCEL * dt;
+  else if (brakeHeld) bot.speed = Math.max(0, bot.speed - V.BRAKE * dt);
+  else bot.speed -= Math.sign(bot.speed) * Math.min(Math.abs(bot.speed), V.COAST * dt);
+
+  const boosting = bot.boostTimer > 0;
+  if (boosting) {
+    bot.speed += BOOSTCFG.propel * dt;
+    bot.boostTimer = Math.max(0, bot.boostTimer - dt);
+    if (bot.boostTimer === 0) bot.boostMul = 1;
+  }
+  const cap = V.MAX_FWD * (boosting ? bot.boostMul : 1);
+  if (bot.speed > cap) bot.speed = Math.max(cap, bot.speed - BOOSTCFG.overspeedDecay * dt);
+  bot.speed = Math.max(0, bot.speed); // bots don't reverse
+
+  const grip = V.LAT_GRIP * (boosting ? BOOSTCFG.gripMul : 1);
+  const gripYawLimit = grip / Math.max(bot.speed, 1);
+  const yawRate = Math.min(V.TURN_RATE, gripYawLimit);
+  bot.heading += steer * yawRate * Math.min(1, bot.speed / V.REF_SPEED) * dt;
+
+  bot.pos.x += Math.sin(bot.heading) * bot.speed * dt;
+  bot.pos.z += Math.cos(bot.heading) * bot.speed * dt;
+
+  const q = botTrackQuery(bot);
+  if (q.dist > WALL_R) {
+    const dx = bot.pos.x - samples[q.i].x, dz = bot.pos.z - samples[q.i].z;
+    const d = Math.hypot(dx, dz) || 1;
+    bot.pos.x = samples[q.i].x + (dx / d) * WALL_R;
+    bot.pos.z = samples[q.i].z + (dz / d) * WALL_R;
+    bot.speed *= 0.7;
+  } else if (q.dist > HALF_ROAD) {
+    bot.speed = Math.min(bot.speed, V.MAX_FWD * WORLD.offroadSpeedMul);
+  }
+
+  if (now >= bot.padCooldownUntil) {
+    const t = tangents[q.i];
+    const n = new THREE.Vector3(-t.z, 0, t.x).normalize();
+    const lateral = (bot.pos.x - samples[q.i].x) * n.x + (bot.pos.z - samples[q.i].z) * n.z;
+    for (const pad of boostPads) {
+      let di = Math.abs(q.i - pad.idx);
+      if (di > TRACK.samples / 2) di = TRACK.samples - di;
+      if (di * sampleSpacing <= PADSCFG.halfLen && Math.abs(lateral - pad.lateral) <= PADSCFG.halfWidth) {
+        const s = BOOSTCFG.sources.pad;
+        bot.boostMul = Math.max(bot.boostTimer > 0 ? bot.boostMul : 1, s.mul);
+        bot.boostTimer = Math.max(bot.boostTimer, s.dur);
+        bot.speed = Math.min(Math.max(bot.speed, V.MAX_FWD) + s.impulse, V.MAX_FWD * bot.boostMul);
+        bot.padCooldownUntil = now + PADSCFG.cooldownMs;
+        break;
+      }
+    }
+  }
+
+  let d = q.i - bot.lapLastIdx;
+  if (d > TRACK.samples / 2) d -= TRACK.samples;
+  if (d < -TRACK.samples / 2) d += TRACK.samples;
+  bot.lapLastIdx = q.i;
+  bot.lapProgress += d;
+  const lapsDone = Math.floor(bot.lapProgress / TRACK.samples);
+  if (lapsDone >= bot.lap) {
+    if (bot.lap >= TRACK.laps) { bot.finished = true; bot.finishTime = now; }
+    else bot.lap++;
+  }
+
+  bot.rig.root.position.copy(bot.pos);
+  bot.rig.root.rotation.y = bot.heading;
+  bot.wheelSpin -= bot.speed * dt * 3;
+  bot.rig.wheels.forEach((w) => (w.rotation.x = bot.wheelSpin));
+  bot.rig.frontWheels.forEach((w) => (w.rotation.y = steer * 0.5));
+  bot.rig.brakeLights.forEach((m) => {
+    m.material.color.setHex(brakeHeld ? 0xff3030 : 0x400000);
+    m.material.emissive.setHex(brakeHeld ? 0xff0000 : 0x000000);
+  });
+}
+
+// Position HUD (plan v4 §5.2): ranks the player against the bots by the same
+// unwrapped lapProgress/finishTime fields already kept for lap counting, so no
+// separate "race progress" bookkeeping is needed.
+function computePlayerPosition() {
+  const racers = [
+    { isPlayer: true, finished: RACE.state === "FINISHED", finishTime: RACE.finishedAt, lapProgress },
+    ...bots.map((b) => ({ isPlayer: false, finished: b.finished, finishTime: b.finishTime, lapProgress: b.lapProgress })),
+  ];
+  racers.sort((a, b) => {
+    if (a.finished !== b.finished) return a.finished ? -1 : 1;
+    if (a.finished) return a.finishTime - b.finishTime;
+    return b.lapProgress - a.lapProgress;
+  });
+  return racers.findIndex((r) => r.isPlayer) + 1;
 }
 
 // ===================================================================
@@ -1456,11 +1798,16 @@ function animate() {
 
   const gasPressedEdge = inputLive && rawGas && !prevRawGas;
   prevRawGas = inputLive && rawGas;
+  if (RACE.state === "COUNTDOWN" && gasPressedEdge) gasPressAt = now;
   updateRace(now, gasPressedEdge);
 
   const racing = RACE.state === "RACING";
 
-  // Drift (plan v3 §5.4): both pedals + turning at speed hijacks the normal
+  // Stall (a too-early rocket-start attempt): no acceleration for a bit, engine sputters.
+  if (stallTimer > 0) stallTimer = Math.max(0, stallTimer - dt);
+  const stalled = stallTimer > 0;
+
+  // Drift (plan v4 §3.2): both pedals + turning at speed hijacks the normal
   // "both held = brake" rule. Everywhere else, both held still just brakes.
   const bothHeld = racing && inputLive && rawGas && brake;
   const canStartDrift = bothHeld && Math.abs(steer) > DRIFTCFG.steerThreshold && speed > V.MAX_FWD * DRIFTCFG.speedThreshold;
@@ -1468,23 +1815,23 @@ function animate() {
     drifting = true;
     driftCharge = 0;
     driftDir = Math.sign(steer) || 1;
+    driftHopT = 0;
   }
-  if (drifting && !bothHeld) {
+  // Drift ends either when the player lets go, or on its own once too slow — that teaches
+  // the minimum drift speed instead of trapping the kart in a slow, boost-less drift forever.
+  const driftTooSlow = drifting && speed < V.MAX_FWD * DRIFTCFG.minSpeedFrac;
+  if (drifting && (!bothHeld || driftTooSlow)) {
     drifting = false;
-    const tier = [...DRIFTCFG.tiers].reverse().find((tr) => driftCharge >= tr.minCharge);
-    if (tier) {
-      boostTimer = tier.boostDur;
-      boostSpeedMul = tier.boostMul;
-      speed = Math.max(speed, V.MAX_FWD * 0.85); // immediate kick, not a slow ACCEL-limited climb
-      spawnDriftSparks(tier.color);
-      gameAudio.boostWhoosh();
-      shakeMag = Math.max(shakeMag, 0.15);
+    if (!driftTooSlow) {
+      const tier = [...DRIFTCFG.tiers].reverse().find((tr) => driftCharge >= tr.minCharge);
+      if (tier) applyBoost(tier.source);
     }
     driftCharge = 0;
   }
+  if (driftHopT >= 0) { driftHopT += dt; if (driftHopT > DRIFTCFG.hopDur) driftHopT = -1; }
 
   const brakeHeld = racing && inputLive && brake && !drifting;
-  const gas = racing && inputLive && rawGas && !brakeHeld && !drifting; // brake wins over gas
+  const gas = racing && inputLive && rawGas && !brakeHeld && !drifting && !stalled; // brake wins over gas
 
   if (gas && !prevGas) shakeMag = Math.max(shakeMag, 0.12);
   if (brakeHeld && !prevBrake && speed > V.MAX_FWD * 0.55) shakeMag = Math.max(shakeMag, 0.2);
@@ -1492,7 +1839,8 @@ function animate() {
 
   if (racing) {
     if (drifting) {
-      driftCharge += dt * DRIFTCFG.chargeRate * (0.5 + Math.abs(steer));
+      // Holding the drift angle charges fastest; counter-steering still charges, just slower.
+      driftCharge += dt * (0.4 + 0.9 * Math.max(0, steer * driftDir) + 0.3 * Math.max(0, -steer * driftDir));
       speed -= DRIFTCFG.speedDecay * dt;
     } else if (!brakeHeld) {
       brakeHold = 0;
@@ -1513,16 +1861,29 @@ function animate() {
       }
     }
 
-    if (boostTimer > 0) { boostTimer = Math.max(0, boostTimer - dt); }
+    // Unified boost speed model (plan v4 §3.1): boosting actively propels the kart
+    // (pedal held or not), and the cap it decays back to is soft — never an instant
+    // clamp, so a boost ending never feels like hitting a wall.
     boosting = boostTimer > 0;
-    const effectiveMaxFwd = boosting ? V.MAX_FWD * boostSpeedMul : V.MAX_FWD;
-    speed = Math.max(-V.MAX_REV, Math.min(effectiveMaxFwd, speed));
+    if (boosting) {
+      speed += BOOSTCFG.propel * dt;
+      boostTimer = Math.max(0, boostTimer - dt);
+      if (boostTimer === 0) { boostMul = 1; boostSource = null; }
+    }
+    let cap = V.MAX_FWD * (boosting ? boostMul : 1);
+    let decay = BOOSTCFG.overspeedDecay;
+    if (offroadPrev && !(boosting && BOOSTCFG.ignoresOffroad)) {
+      cap = Math.min(cap, V.MAX_FWD * WORLD.offroadSpeedMul);
+      decay = BOOSTCFG.offroadDecay;
+    }
+    if (speed > cap) speed = Math.max(cap, speed - decay * dt);
+    speed = Math.max(-V.MAX_REV, speed);
 
     // Grip limit (B5): without this, yaw rate above REF_SPEED is constant regardless
     // of actual speed, so every corner (even the hairpin) could be taken flat-out.
     const turnRateMul = drifting ? DRIFTCFG.turnRateBonus : 1;
     const speedFactor = Math.max(-1, Math.min(1, speed / V.REF_SPEED));
-    const grip = V.LAT_GRIP * (drifting ? V.DRIFT_GRIP_MUL : 1);
+    const grip = V.LAT_GRIP * (drifting ? V.DRIFT_GRIP_MUL : 1) * (boosting ? BOOSTCFG.gripMul : 1);
     const gripYawLimit = grip / Math.max(Math.abs(speed), 1); // a = v^2/r  =>  yaw = a/v
     const yawRate = Math.min(V.TURN_RATE * turnRateMul, gripYawLimit);
     heading += steer * yawRate * speedFactor * dt;
@@ -1531,7 +1892,8 @@ function animate() {
     pos.z += Math.cos(heading) * speed * dt;
   } else {
     speed = 0; // frozen during lobby/countdown/finished
-    drifting = false; driftCharge = 0; boostTimer = 0; boosting = false;
+    drifting = false; driftCharge = 0;
+    boostTimer = 0; boostMul = 1; boostSource = null; boosting = false;
   }
   const speedFrac = Math.min(1, Math.abs(speed) / V.MAX_FWD);
 
@@ -1544,43 +1906,44 @@ function animate() {
   const q = trackQuery(pos);
   checkWrongWay(dt, q);
   let offroad = false;
-  let wallHit = false;
   if (racing) {
+    wallCooldown = Math.max(0, wallCooldown - dt);
     if (q.dist > WALL_R) {
-      wallHit = true;
+      // Position push-back happens on every contact frame, same as before.
       const dx = pos.x - samples[q.i].x, dz = pos.z - samples[q.i].z;
       const d = Math.hypot(dx, dz) || 1;
-      const threshold = WALL_R;
-      pos.x = samples[q.i].x + (dx / d) * threshold;
-      pos.z = samples[q.i].z + (dz / d) * threshold;
-      speed *= 0.55; // eased from 0.4 — hitting a wall shouldn't cost almost all your speed
-      shakeMag = Math.max(shakeMag, 0.25);
-      if (!prevWallHit) { gameAudio.wallThump(); triggerWallWobble(); }
+      pos.x = samples[q.i].x + (dx / d) * WALL_R;
+      pos.z = samples[q.i].z + (dz / d) * WALL_R;
+      // Angle-based slide (plan v4 §3.6), once per contact: a glancing hit barely costs
+      // speed, a head-on hit costs a lot — replaces a flat speed cut every single frame
+      // of contact, which used to bleed speed fast even when sliding along a wall.
+      if (wallCooldown <= 0) {
+        const t = tangents[q.i];
+        const fx = Math.sin(heading), fz = Math.cos(heading);
+        const along = fx * t.x + fz * t.z; // 1 = parallel to the wall, 0 = head-on
+        const impact = 1 - Math.abs(along);
+        speed *= 1 - 0.65 * impact;
+        const wallHeading = Math.atan2(t.x * Math.sign(along || 1), t.z * Math.sign(along || 1));
+        heading += angleDelta(heading, wallHeading) * 0.5;
+        shakeMag = Math.max(shakeMag, 0.1 + 0.25 * impact);
+        wallCooldown = 0.3;
+        gameAudio.wallThump();
+        triggerWallWobble();
+      }
     } else if (q.dist > HALF_ROAD) {
       offroad = true;
-      if (speed > V.MAX_FWD * WORLD.offroadSpeedMul) speed = V.MAX_FWD * WORLD.offroadSpeedMul;
     }
   }
-  prevWallHit = wallHit;
+  offroadPrev = offroad; // feeds next frame's unified boost/speed cap, computed earlier this frame
 
-  if (racing) {
-    for (const pad of boostPads) {
-      if (now - pad.lastTriggeredAt < 1000) continue;
-      if (pad.center.distanceTo(pos) < 1.3) {
-        pad.lastTriggeredAt = now;
-        boostTimer = BOOST_PADS.duration;
-        boostSpeedMul = BOOST_PADS.speedMul;
-        speed = Math.max(speed, V.MAX_FWD * 0.9);
-        gameAudio.boostWhoosh();
-        shakeMag = Math.max(shakeMag, 0.12);
-      }
-    }
-  }
+  if (racing) checkBoostPad(now, q);
+
+  bots.forEach((bot) => stepBot(bot, dt, now));
 
   kartRoot.position.copy(pos);
   kartRoot.rotation.y = visualHeading;
   kartRoot.updateMatrixWorld(); // exhaust spawn below needs this frame's transform, not last frame's
-  animateBody(dt, steer, speed, drifting, boosting, offroad, driftDir);
+  animateBody(dt, steer, speed, drifting, boosting, offroad, driftDir, driftHopT);
   frontWheels.forEach((w) => (w.rotation.y = steer * 0.5));
   wheels.forEach((w) => (w.rotation.x -= speed * dt * 3));
 
@@ -1678,8 +2041,8 @@ function animate() {
   updateClouds(dt);
   drawSpeedLines(speedFrac, boosting);
   drawMinimap();
-  hud.update(now, speed, RACE);
-  hud.setDrift(drifting, driftCharge, DRIFTCFG.tiers);
+  hud.update(now, speed, RACE, computePlayerPosition(), bots.length + 1);
+  hud.setDrift(drifting, driftCharge, DRIFTCFG.tiers, BOOSTCFG.sources);
   document.getElementById("speed").textContent = `${Math.round(speedFrac * 100)}%${speed < 0 ? " R" : ""}`;
 
   if (composer) {

@@ -56,9 +56,28 @@
     position: absolute; background: rgba(36, 25, 52, 0.72); border-radius: 16px; padding: 1.2vh 1.4vw;
   }
   .hud-lap    { top: 5vh; left: 5vw; }
+  .hud-pos-row { margin-top: 0.6vh; }
+  .hud-pos-row .hud-big { font-size: clamp(22px, 4vh, 44px); }
+  .hud-pos-row .hud-big.p1 { color: #ffd23f; }
   .hud-timer  { top: 5vh; left: 50%; transform: translateX(-50%); text-align: center; }
   .hud-minimap{ top: 5vh; right: 5vw; width: 18vh; height: 18vh; padding: 0; }
   .hud-speedo { bottom: 5vh; right: 5vw; width: 20vh; height: 20vh; display: grid; place-items: center; }
+  .hud-turbo-pop {
+    position: absolute; top: -8px; left: 50%; transform: translateX(-50%) scale(0.6);
+    font-family: 'TiltDisplay', system-ui, sans-serif; font-size: 20px; color: #ffd23f;
+    opacity: 0; pointer-events: none;
+  }
+  .hud-turbo-pop.show { animation: turboPop 700ms ease-out; }
+  @keyframes turboPop {
+    0%   { opacity: 0; transform: translateX(-50%) scale(0.6) translateY(10px); }
+    25%  { opacity: 1; transform: translateX(-50%) scale(1.15) translateY(-4px); }
+    70%  { opacity: 1; transform: translateX(-50%) scale(1) translateY(-6px); }
+    100% { opacity: 0; transform: translateX(-50%) scale(1) translateY(-14px); }
+  }
+  #boost-flash { position: fixed; inset: 0; pointer-events: none; z-index: 26; opacity: 0; background: #ffd23f; mix-blend-mode: screen; }
+  #boost-flash.show { animation: boostFlash 220ms ease-out; }
+  @keyframes boostFlash { 0% { opacity: 0.55; } 100% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .hud-turbo-pop.show, #boost-flash.show { animation-duration: 1ms; } }
   .hud-conn   { bottom: 5vh; left: 5vw; font-size: 14px; opacity: 0.7; }
   .hud-conn .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #2fe6a0; margin-right: 6px; }
   .hud-conn .dot.off { background: #ff5d3a; }
@@ -152,6 +171,10 @@
     <div class="hud-lap">
       <span class="hud-label">VOLTA</span><br />
       <span class="hud-big"><span id="hud-lap">1</span>/<span id="hud-laps">3</span></span>
+      <div class="hud-pos-row">
+        <span class="hud-label">POSIÇÃO</span><br />
+        <span id="hud-pos" class="hud-big p1">1</span><span class="hud-big">/<span id="hud-pos-total">4</span></span>
+      </div>
     </div>
 
     <div class="hud-timer">
@@ -171,6 +194,7 @@
         <span id="hud-gear" class="hud-gear">D</span>
       </div>
       <span class="hud-label">km/h</span>
+      <span id="hud-turbo-pop" class="hud-turbo-pop">TURBO!</span>
     </div>
 
     <div class="hud-conn"><span id="hud-conn-dot" class="dot off"></span><span id="hud-rtt">-- ms</span></div>
@@ -181,6 +205,7 @@
   </div>
 
   <div id="hud-banner" class="hud-banner" aria-live="polite"></div>
+  <div id="boost-flash"></div>
 
   <div id="results">
     <div id="results-card">
